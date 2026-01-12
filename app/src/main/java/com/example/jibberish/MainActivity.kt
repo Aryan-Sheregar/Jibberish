@@ -8,22 +8,38 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.jibberish.managers.DataRetentionManager
 import com.example.jibberish.managers.JargonManager
@@ -65,6 +81,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Data class for jargon items in the list
+data class JargonItem(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val jargon: String,
+    val meaning: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 @Composable
 fun MainAppStructure(
     speechManager: SpeechManager, 
@@ -73,6 +97,9 @@ fun MainAppStructure(
     dataRetentionManager: DataRetentionManager
 ) {
     var currentScreen by remember { mutableStateOf("home") }
+    
+    // Track if there's a new summary notification for History tab
+    var hasNewSummary by remember { mutableStateOf(false) }
 
     Scaffold(
         bottomBar = {
@@ -84,10 +111,29 @@ fun MainAppStructure(
                     onClick = { currentScreen = "home" }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "History") },
+                    icon = {
+                        BadgedBox(
+                            badge = {
+                                if (hasNewSummary) {
+                                    Badge {
+                                        Icon(
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = "New summary",
+                                            modifier = Modifier.size(8.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.List, contentDescription = "History")
+                        }
+                    },
                     label = { Text("History") },
                     selected = currentScreen == "history",
-                    onClick = { currentScreen = "history" }
+                    onClick = { 
+                        currentScreen = "history"
+                        hasNewSummary = false // Clear badge when visiting history
+                    }
                 )
                 NavigationBarItem(
                     icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
@@ -100,7 +146,12 @@ fun MainAppStructure(
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding)) {
             when (currentScreen) {
-                "home" -> HomeScreen(speechManager, jargonManager, sessionManager)
+                "home" -> HomeScreen(
+                    speechManager = speechManager, 
+                    jargonManager = jargonManager, 
+                    sessionManager = sessionManager,
+                    onSummaryGenerated = { hasNewSummary = true }
+                )
                 "history" -> HistoryScreen(sessionManager)
                 "settings" -> SettingsScreen(dataRetentionManager)
             }
@@ -108,11 +159,13 @@ fun MainAppStructure(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     speechManager: SpeechManager, 
     jargonManager: JargonManager,
-    sessionManager: SessionManager
+    sessionManager: SessionManager,
+    onSummaryGenerated: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val textState by speechManager.transcribedText.collectAsState()
@@ -123,6 +176,11 @@ fun HomeScreen(
     val sessionStatus by sessionManager.sessionStatus.collectAsState()
     val currentTranslations by sessionManager.currentTranslations.collectAsState()
     val scope = rememberCoroutineScope()
+    
+    // List of jargon items detected during the session
+    var jargonItems by remember { mutableStateOf<List<JargonItem>>(emptyList()) }
+    var unreadJargonCount by remember { mutableIntStateOf(0) }
+    val jargonListState = rememberLazyListState()
 
     var hasPermission: Boolean by remember {
         mutableStateOf(
@@ -135,6 +193,57 @@ fun HomeScreen(
         onResult = { isGranted -> hasPermission = isGranted }
     )
     
+    // Auto-start session when app opens
+    LaunchedEffect(Unit) {
+        if (!isSessionActive && hasPermission) {
+            sessionManager.startSession()
+            if (modelStatus is JargonManager.ModelStatus.Ready) {
+                speechManager.startListening()
+            }
+        }
+    }
+    
+    // Auto-start listening when permission is granted and session starts
+    LaunchedEffect(hasPermission, isSessionActive, modelStatus) {
+        if (hasPermission && isSessionActive && modelStatus is JargonManager.ModelStatus.Ready && !isListening) {
+            speechManager.startListening()
+        }
+    }
+    
+    // Track jargon analysis results, add to UI list, and save to database
+    LaunchedEffect(jargonAnalysis) {
+        jargonAnalysis?.let { analysis ->
+            if (analysis is JargonManager.JargonResult.Success) {
+                // Save to database if session is active
+                if (isSessionActive) {
+                    sessionManager.addTranslation(
+                        originalText = analysis.sentence,
+                        jsonOutput = "",
+                        containsJargon = analysis.containsJargon,
+                        jargonTerms = analysis.jargons,
+                        simplifiedMeaning = analysis.simplifiedMeaning
+                    )
+                }
+                
+                // Add to UI list if contains jargon
+                if (analysis.containsJargon) {
+                    analysis.jargons.forEach { jargon ->
+                        val newItem = JargonItem(
+                            jargon = jargon,
+                            meaning = analysis.simplifiedMeaning
+                        )
+                        jargonItems = jargonItems + newItem
+                        unreadJargonCount++
+                    }
+                    // Auto-scroll to bottom when new items are added
+                    if (jargonItems.isNotEmpty()) {
+                        jargonListState.animateScrollToItem(jargonItems.size - 1)
+                    }
+                }
+            }
+        }
+    }
+    
     // Animate session toggle color
     val sessionToggleColor by animateColorAsState(
         targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
@@ -144,235 +253,361 @@ fun HomeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.Top
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         
-        // Session Control Card
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = sessionToggleColor
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "Session",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isSessionActive) Color.White else MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = when (sessionStatus) {
-                                is SessionManager.SessionStatus.Active -> "Recording translations..."
-                                is SessionManager.SessionStatus.GeneratingSummary -> "Generating summary..."
-                                is SessionManager.SessionStatus.Starting -> "Starting..."
-                                else -> "Toggle to start"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isSessionActive) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    
-                    Switch(
-                        checked = isSessionActive,
-                        onCheckedChange = { shouldActivate ->
-                            scope.launch {
-                                if (shouldActivate) {
-                                    sessionManager.startSession()
-                                } else {
-                                    // Stop listening first if active
-                                    if (isListening) {
-                                        speechManager.stopListening()
-                                    }
-                                    sessionManager.endSession()
-                                }
-                            }
-                        },
-                        enabled = sessionStatus !is SessionManager.SessionStatus.GeneratingSummary
-                    )
-                }
-                
-                if (isSessionActive) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "${currentTranslations.size} translations captured",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.9f)
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Transcription Display
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "Transcription",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = textState,
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Jargon Analysis Display
-        jargonAnalysis?.let { analysis ->
-            JargonAnalysisCard(analysis)
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Transcribe Button - saves to session when pressed
-        Button(
-            onClick = {
-                if (!hasPermission) {
-                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                } else {
-                    if (isListening) {
-                        speechManager.stopListening()
-                        // Save the current transcription to the session
-                        jargonAnalysis?.let { analysis ->
-                            if (analysis is JargonManager.JargonResult.Success && isSessionActive) {
-                                scope.launch {
-                                    sessionManager.addTranslation(
-                                        originalText = analysis.sentence,
-                                        jsonOutput = "", // Could serialize the full response if needed
-                                        containsJargon = analysis.containsJargon,
-                                        jargonTerms = analysis.jargons,
-                                        simplifiedMeaning = analysis.simplifiedMeaning
-                                    )
-                                }
-                            }
+        // Top Bar - Session Control
+        SessionControlBar(
+            isSessionActive = isSessionActive,
+            sessionStatus = sessionStatus,
+            isListening = isListening,
+            translationCount = currentTranslations.size,
+            onToggle = { shouldActivate ->
+                scope.launch {
+                    if (shouldActivate) {
+                        sessionManager.startSession()
+                        if (hasPermission && modelStatus is JargonManager.ModelStatus.Ready) {
+                            speechManager.startListening()
                         }
                     } else {
-                        speechManager.startListening()
+                        speechManager.stopListening()
+                        val session = sessionManager.endSession()
+                        if (session?.generatedSummary != null) {
+                            onSummaryGenerated()
+                        }
+                        // Clear jargon items when session ends
+                        jargonItems = emptyList()
+                        unreadJargonCount = 0
                     }
                 }
             },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isListening) Color.Red else MaterialTheme.colorScheme.primary
-            ),
-            modifier = Modifier.size(width = 200.dp, height = 60.dp),
-            enabled = modelStatus is JargonManager.ModelStatus.Ready && 
-                     (isSessionActive || !isListening) // Can only start if session is active
+            onRequestPermission = {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            },
+            hasPermission = hasPermission,
+            modelReady = modelStatus is JargonManager.ModelStatus.Ready
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Transcription Area
+        TranscriptionCard(
+            text = textState,
+            isListening = isListening,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(0.3f)
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Jargon Cards Section
+        JargonSection(
+            jargonItems = jargonItems,
+            unreadCount = unreadJargonCount,
+            listState = jargonListState,
+            onClearUnread = { unreadJargonCount = 0 },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(0.7f)
+        )
+    }
+}
+
+@Composable
+private fun SessionControlBar(
+    isSessionActive: Boolean,
+    sessionStatus: SessionManager.SessionStatus,
+    isListening: Boolean,
+    translationCount: Int,
+    onToggle: (Boolean) -> Unit,
+    onRequestPermission: () -> Unit,
+    hasPermission: Boolean,
+    modelReady: Boolean
+) {
+    val backgroundColor by animateColorAsState(
+        targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
+        label = "bg_color"
+    )
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = when {
-                    isListening -> "STOP & SAVE"
-                    !isSessionActive -> "START SESSION"
-                    else -> "TRANSCRIBE"
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = when {
+                        sessionStatus is SessionManager.SessionStatus.GeneratingSummary -> "Generating Summary..."
+                        isSessionActive && isListening -> "🎙️ Listening"
+                        isSessionActive -> "Session Active"
+                        else -> "Toggle to start"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isSessionActive) Color.White else MaterialTheme.colorScheme.onSurface
+                )
+                if (isSessionActive) {
+                    Text(
+                        text = "$translationCount chunks captured",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.8f)
+                    )
                 }
-            )
-        }
-        
-        if (!isSessionActive && !isListening) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Toggle session ON to start transcribing",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            
+            Switch(
+                checked = isSessionActive,
+                onCheckedChange = { shouldActivate ->
+                    if (!hasPermission && shouldActivate) {
+                        onRequestPermission()
+                    } else {
+                        onToggle(shouldActivate)
+                    }
+                },
+                enabled = sessionStatus !is SessionManager.SessionStatus.GeneratingSummary && modelReady,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color.White.copy(alpha = 0.3f),
+                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             )
         }
     }
 }
 
 @Composable
-fun JargonAnalysisCard(analysis: JargonManager.JargonResult) {
-    when (analysis) {
-        is JargonManager.JargonResult.Success -> {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (analysis.containsJargon) 
-                        MaterialTheme.colorScheme.errorContainer 
-                    else 
-                        MaterialTheme.colorScheme.primaryContainer
-                )
+private fun TranscriptionCard(
+    text: String,
+    isListening: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = if (analysis.containsJargon) "⚠️ Jargon Detected" else "✓ No Jargon",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = if (analysis.containsJargon) 
-                                MaterialTheme.colorScheme.error 
-                            else 
-                                MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    
-                    if (analysis.containsJargon && analysis.jargons.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Jargon Terms:",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        analysis.jargons.forEach { jargon ->
-                            Text(
-                                text = "• $jargon",
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(start = 8.dp, top = 4.dp)
-                            )
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Simplified:",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = analysis.simplifiedMeaning,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 4.dp)
+                Text(
+                    text = "Transcription",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                if (isListening) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    // Pulsing indicator
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red)
                     )
                 }
             }
-        }
-        is JargonManager.JargonResult.Error -> {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer
-                )
+            Spacer(modifier = Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
             ) {
                 Text(
-                    text = analysis.message,
+                    text = text,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp)
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun JargonSection(
+    jargonItems: List<JargonItem>,
+    unreadCount: Int,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onClearUnread: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        // Section Header with badge
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Jargons",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            if (unreadCount > 0) {
+                Badge(
+                    containerColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = null,
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = unreadCount.toString(),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                text = "${jargonItems.size} total",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        
+        // Jargon Cards List
+        if (jargonItems.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "🔍",
+                        fontSize = 48.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "No jargon detected yet",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Start speaking to detect corporate jargon",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(jargonItems, key = { it.id }) { item ->
+                    JargonNotificationCard(
+                        jargon = item.jargon,
+                        meaning = item.meaning
+                    )
+                }
+                // Add some padding at the bottom
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+    
+    // Clear unread count when user scrolls
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            onClearUnread()
+        }
+    }
+}
+
+@Composable
+private fun JargonNotificationCard(
+    jargon: String,
+    meaning: String
+) {
+    // iOS-style notification card
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // Icon/Indicator
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(
+                                Color(0xFFFF6B6B),
+                                Color(0xFFFF8E53)
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "⚠️",
+                    fontSize = 18.sp
+                )
+            }
+            
+            Spacer(modifier = Modifier.width(12.dp))
+            
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = jargon,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = meaning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 18.sp
                 )
             }
         }

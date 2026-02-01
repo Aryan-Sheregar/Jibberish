@@ -8,19 +8,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -41,44 +40,97 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.jibberish.api.GroqApiService
+import com.example.jibberish.managers.ApiKeyManager
+import com.example.jibberish.managers.AudioRecorderManager
 import com.example.jibberish.managers.DataRetentionManager
 import com.example.jibberish.managers.JargonManager
+import com.example.jibberish.managers.ModelManager
 import com.example.jibberish.managers.SessionManager
-import com.example.jibberish.managers.SpeechManager
 import com.example.jibberish.ui.screens.HistoryScreen
 import com.example.jibberish.ui.screens.SettingsScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
+    private lateinit var modelManager: ModelManager
     private lateinit var jargonManager: JargonManager
-    private lateinit var speechManager: SpeechManager
+    private lateinit var audioRecorderManager: AudioRecorderManager
     private lateinit var sessionManager: SessionManager
     private lateinit var dataRetentionManager: DataRetentionManager
+    private lateinit var apiKeyManager: ApiKeyManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        jargonManager = JargonManager(this)
-        sessionManager = SessionManager(this)
+
+        apiKeyManager = ApiKeyManager(this)
+        modelManager = ModelManager(this)
         dataRetentionManager = DataRetentionManager(this)
-        
-        // Create SpeechManager with callback that analyzes jargon
-        speechManager = SpeechManager(this) { transcription: String ->
-            jargonManager.analyzeJargon(transcription)
+        jargonManager = JargonManager(this, modelManager)
+        sessionManager = SessionManager(this, modelManager)
+
+        // Create AudioRecorderManager with callback that transcribes audio chunks
+        audioRecorderManager = AudioRecorderManager(this) { audioFile ->
+            val apiKey = apiKeyManager.getApiKeyOnce()
+            if (apiKey.isNotBlank()) {
+                val groqService = GroqApiService(apiKey)
+                val result = groqService.transcribeAudio(audioFile)
+                result.onSuccess { transcription ->
+                    if (transcription.isNotBlank() && !isWhisperHallucination(transcription)) {
+                        audioRecorderManager.updateTranscription(transcription)
+                        jargonManager.analyzeJargon(transcription)
+                    }
+                }
+            }
+        }
+
+        // Initialize model
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            modelManager.initializeModel()
         }
 
         setContent {
             JibberishTheme {
-                MainAppStructure(speechManager, jargonManager, sessionManager, dataRetentionManager)
+                MainAppStructure(
+                    audioRecorderManager = audioRecorderManager,
+                    jargonManager = jargonManager,
+                    sessionManager = sessionManager,
+                    dataRetentionManager = dataRetentionManager,
+                    apiKeyManager = apiKeyManager,
+                    modelManager = modelManager
+                )
             }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        speechManager.release()
+        audioRecorderManager.release()
         jargonManager.close()
+        modelManager.cleanup()
     }
+}
+
+/**
+ * Filters known Whisper hallucination phrases that appear on silent/near-silent audio.
+ */
+private fun isWhisperHallucination(text: String): Boolean {
+    val normalized = text.trim().lowercase().removeSuffix(".").removeSuffix("!").trim()
+    val hallucinations = setOf(
+        "thank you",
+        "thanks for watching",
+        "thanks for listening",
+        "subscribe",
+        "please subscribe",
+        "like and subscribe",
+        "bye",
+        "goodbye",
+        "you",
+        "the end",
+    )
+    return normalized in hallucinations
 }
 
 // Data class for jargon items in the list
@@ -91,13 +143,15 @@ data class JargonItem(
 
 @Composable
 fun MainAppStructure(
-    speechManager: SpeechManager, 
+    audioRecorderManager: AudioRecorderManager,
     jargonManager: JargonManager,
     sessionManager: SessionManager,
-    dataRetentionManager: DataRetentionManager
+    dataRetentionManager: DataRetentionManager,
+    apiKeyManager: ApiKeyManager,
+    modelManager: ModelManager
 ) {
     var currentScreen by remember { mutableStateOf("home") }
-    
+
     // Track if there's a new summary notification for History tab
     var hasNewSummary by remember { mutableStateOf(false) }
 
@@ -130,9 +184,9 @@ fun MainAppStructure(
                     },
                     label = { Text("History") },
                     selected = currentScreen == "history",
-                    onClick = { 
+                    onClick = {
                         currentScreen = "history"
-                        hasNewSummary = false // Clear badge when visiting history
+                        hasNewSummary = false
                     }
                 )
                 NavigationBarItem(
@@ -147,13 +201,18 @@ fun MainAppStructure(
         Box(modifier = Modifier.padding(innerPadding)) {
             when (currentScreen) {
                 "home" -> HomeScreen(
-                    speechManager = speechManager, 
-                    jargonManager = jargonManager, 
+                    audioRecorderManager = audioRecorderManager,
+                    jargonManager = jargonManager,
                     sessionManager = sessionManager,
+                    apiKeyManager = apiKeyManager,
                     onSummaryGenerated = { hasNewSummary = true }
                 )
                 "history" -> HistoryScreen(sessionManager)
-                "settings" -> SettingsScreen(dataRetentionManager)
+                "settings" -> SettingsScreen(
+                    dataRetentionManager = dataRetentionManager,
+                    apiKeyManager = apiKeyManager,
+                    modelManager = modelManager
+                )
             }
         }
     }
@@ -162,21 +221,23 @@ fun MainAppStructure(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    speechManager: SpeechManager, 
+    audioRecorderManager: AudioRecorderManager,
     jargonManager: JargonManager,
     sessionManager: SessionManager,
+    apiKeyManager: ApiKeyManager,
     onSummaryGenerated: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val textState by speechManager.transcribedText.collectAsState()
-    val isListening by speechManager.isListening.collectAsState()
+    val textState by audioRecorderManager.transcribedText.collectAsState()
+    val isRecording by audioRecorderManager.isRecording.collectAsState()
     val modelStatus by jargonManager.modelStatus.collectAsState()
     val jargonAnalysis by jargonManager.lastAnalysis.collectAsState()
     val isSessionActive by sessionManager.isSessionActive.collectAsState()
     val sessionStatus by sessionManager.sessionStatus.collectAsState()
     val currentTranslations by sessionManager.currentTranslations.collectAsState()
+    val hasApiKey by apiKeyManager.hasApiKey().collectAsState(initial = false)
     val scope = rememberCoroutineScope()
-    
+
     // List of jargon items detected during the session
     var jargonItems by remember { mutableStateOf<List<JargonItem>>(emptyList()) }
     var unreadJargonCount by remember { mutableIntStateOf(0) }
@@ -192,24 +253,26 @@ fun HomeScreen(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { isGranted -> hasPermission = isGranted }
     )
-    
+
     // Auto-start session when app opens
     LaunchedEffect(Unit) {
-        if (!isSessionActive && hasPermission) {
+        if (!isSessionActive && hasPermission && hasApiKey) {
             sessionManager.startSession()
             if (modelStatus is JargonManager.ModelStatus.Ready) {
-                speechManager.startListening()
+                audioRecorderManager.startRecording()
             }
         }
     }
-    
-    // Auto-start listening when permission is granted and session starts
-    LaunchedEffect(hasPermission, isSessionActive, modelStatus) {
-        if (hasPermission && isSessionActive && modelStatus is JargonManager.ModelStatus.Ready && !isListening) {
-            speechManager.startListening()
+
+    // Auto-start recording when permission is granted and session starts
+    LaunchedEffect(hasPermission, isSessionActive, modelStatus, hasApiKey) {
+        if (hasPermission && isSessionActive && hasApiKey &&
+            modelStatus is JargonManager.ModelStatus.Ready && !isRecording
+        ) {
+            audioRecorderManager.startRecording()
         }
     }
-    
+
     // Track jargon analysis results, add to UI list, and save to database
     LaunchedEffect(jargonAnalysis) {
         jargonAnalysis?.let { analysis ->
@@ -224,7 +287,7 @@ fun HomeScreen(
                         simplifiedMeaning = analysis.simplifiedMeaning
                     )
                 }
-                
+
                 // Add to UI list if contains jargon
                 if (analysis.containsJargon) {
                     analysis.jargons.forEach { jargon ->
@@ -243,12 +306,6 @@ fun HomeScreen(
             }
         }
     }
-    
-    // Animate session toggle color
-    val sessionToggleColor by animateColorAsState(
-        targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
-        label = "session_toggle_color"
-    )
 
     Column(
         modifier = Modifier
@@ -257,22 +314,41 @@ fun HomeScreen(
         verticalArrangement = Arrangement.Top
     ) {
         Spacer(modifier = Modifier.height(8.dp))
-        
+
+        // API key warning
+        if (!hasApiKey) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(
+                    text = "Groq API key not configured. Go to Settings to add your API key.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         // Top Bar - Session Control
         SessionControlBar(
             isSessionActive = isSessionActive,
             sessionStatus = sessionStatus,
-            isListening = isListening,
+            isRecording = isRecording,
             translationCount = currentTranslations.size,
             onToggle = { shouldActivate ->
                 scope.launch {
                     if (shouldActivate) {
                         sessionManager.startSession()
-                        if (hasPermission && modelStatus is JargonManager.ModelStatus.Ready) {
-                            speechManager.startListening()
+                        if (hasPermission && hasApiKey && modelStatus is JargonManager.ModelStatus.Ready) {
+                            audioRecorderManager.startRecording()
                         }
                     } else {
-                        speechManager.stopListening()
+                        audioRecorderManager.stopRecording()
                         val session = sessionManager.endSession()
                         if (session?.generatedSummary != null) {
                             onSummaryGenerated()
@@ -287,7 +363,8 @@ fun HomeScreen(
                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             },
             hasPermission = hasPermission,
-            modelReady = modelStatus is JargonManager.ModelStatus.Ready
+            modelReady = modelStatus is JargonManager.ModelStatus.Ready,
+            hasApiKey = hasApiKey
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -295,7 +372,7 @@ fun HomeScreen(
         // Transcription Area
         TranscriptionCard(
             text = textState,
-            isListening = isListening,
+            isRecording = isRecording,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(0.3f)
@@ -320,18 +397,22 @@ fun HomeScreen(
 private fun SessionControlBar(
     isSessionActive: Boolean,
     sessionStatus: SessionManager.SessionStatus,
-    isListening: Boolean,
+    isRecording: Boolean,
     translationCount: Int,
     onToggle: (Boolean) -> Unit,
     onRequestPermission: () -> Unit,
     hasPermission: Boolean,
-    modelReady: Boolean
+    modelReady: Boolean,
+    hasApiKey: Boolean
 ) {
+    val isLoading = sessionStatus is SessionManager.SessionStatus.Starting ||
+            sessionStatus is SessionManager.SessionStatus.GeneratingSummary
+
     val backgroundColor by animateColorAsState(
         targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
         label = "bg_color"
     )
-    
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = backgroundColor),
@@ -348,13 +429,14 @@ private fun SessionControlBar(
                 Text(
                     text = when {
                         sessionStatus is SessionManager.SessionStatus.GeneratingSummary -> "Generating Summary..."
-                        isSessionActive && isListening -> "🎙️ Listening"
+                        sessionStatus is SessionManager.SessionStatus.Starting -> "Starting Session..."
+                        isSessionActive && isRecording -> "Listening"
                         isSessionActive -> "Session Active"
                         else -> "Toggle to start"
                     },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (isSessionActive) Color.White else MaterialTheme.colorScheme.onSurface
+                    color = if (isSessionActive || isLoading) Color.White else MaterialTheme.colorScheme.onSurface
                 )
                 if (isSessionActive) {
                     Text(
@@ -364,23 +446,64 @@ private fun SessionControlBar(
                     )
                 }
             }
-            
-            Switch(
-                checked = isSessionActive,
-                onCheckedChange = { shouldActivate ->
-                    if (!hasPermission && shouldActivate) {
-                        onRequestPermission()
-                    } else {
-                        onToggle(shouldActivate)
-                    }
-                },
-                enabled = sessionStatus !is SessionManager.SessionStatus.GeneratingSummary && modelReady,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Color.White.copy(alpha = 0.3f),
-                    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(32.dp),
+                    color = Color.White,
+                    strokeWidth = 3.dp
                 )
+            } else {
+                Switch(
+                    checked = isSessionActive,
+                    onCheckedChange = { shouldActivate ->
+                        if (!hasPermission && shouldActivate) {
+                            onRequestPermission()
+                        } else {
+                            onToggle(shouldActivate)
+                        }
+                    },
+                    enabled = modelReady && hasApiKey,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Color.White.copy(alpha = 0.3f),
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AudioWaveIndicator(modifier: Modifier = Modifier) {
+    val infiniteTransition = rememberInfiniteTransition(label = "audio_wave")
+    val barCount = 5
+    val barHeights = (0 until barCount).map { index ->
+        infiniteTransition.animateFloat(
+            initialValue = 0.3f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 400 + index * 80),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "bar_$index"
+        )
+    }
+
+    Row(
+        modifier = modifier.height(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        barHeights.forEach { animatedHeight ->
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight(animatedHeight.value)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(Color.Red)
             )
         }
     }
@@ -389,7 +512,7 @@ private fun SessionControlBar(
 @Composable
 private fun TranscriptionCard(
     text: String,
-    isListening: Boolean,
+    isRecording: Boolean,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -414,15 +537,9 @@ private fun TranscriptionCard(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                if (isListening) {
+                if (isRecording) {
                     Spacer(modifier = Modifier.width(8.dp))
-                    // Pulsing indicator
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(Color.Red)
-                    )
+                    AudioWaveIndicator()
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -491,7 +608,7 @@ private fun JargonSection(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        
+
         // Jargon Cards List
         if (jargonItems.isEmpty()) {
             Box(
@@ -503,11 +620,6 @@ private fun JargonSection(
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "🔍",
-                        fontSize = 48.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "No jargon detected yet",
                         style = MaterialTheme.typography.bodyMedium,
@@ -532,14 +644,13 @@ private fun JargonSection(
                         meaning = item.meaning
                     )
                 }
-                // Add some padding at the bottom
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                 }
             }
         }
     }
-    
+
     // Clear unread count when user scrolls
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) {
@@ -553,7 +664,6 @@ private fun JargonNotificationCard(
     jargon: String,
     meaning: String
 ) {
-    // iOS-style notification card
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -568,7 +678,6 @@ private fun JargonNotificationCard(
                 .padding(12.dp),
             verticalAlignment = Alignment.Top
         ) {
-            // Icon/Indicator
             Box(
                 modifier = Modifier
                     .size(40.dp)
@@ -584,13 +693,15 @@ private fun JargonNotificationCard(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "⚠️",
-                    fontSize = 18.sp
+                    text = "!",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
                 )
             }
-            
+
             Spacer(modifier = Modifier.width(12.dp))
-            
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = jargon,

@@ -65,6 +65,12 @@ dependencies {
     
     // ViewModel Compose
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+
+    // OkHttp for network requests (Groq API)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // MediaPipe GenAI for on-device LLM inference
+    implementation("com.google.mediapipe:tasks-genai:0.10.22")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

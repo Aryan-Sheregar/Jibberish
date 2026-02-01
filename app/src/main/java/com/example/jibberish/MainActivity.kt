@@ -32,7 +32,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -52,7 +51,6 @@ import com.example.jibberish.ui.screens.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
     private lateinit var modelManager: ModelManager
@@ -320,14 +318,14 @@ fun HomeScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(
                     text = "Groq API key not configured. Go to Settings to add your API key.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
                     modifier = Modifier.padding(12.dp)
                 )
             }
@@ -503,7 +501,7 @@ private fun AudioWaveIndicator(modifier: Modifier = Modifier) {
                     .width(3.dp)
                     .fillMaxHeight(animatedHeight.value)
                     .clip(RoundedCornerShape(1.5.dp))
-                    .background(Color.Red)
+                    .background(MaterialTheme.colorScheme.primary)
             )
         }
     }
@@ -682,21 +680,14 @@ private fun JargonNotificationCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(
-                                Color(0xFFFF6B6B),
-                                Color(0xFFFF8E53)
-                            )
-                        )
-                    ),
+                    .background(MaterialTheme.colorScheme.tertiaryContainer),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "!",
-                    fontSize = 20.sp,
+                    text = "J",
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
                 )
             }
 

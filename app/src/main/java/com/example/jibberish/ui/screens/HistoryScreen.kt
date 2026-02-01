@@ -119,11 +119,6 @@ private fun SessionListScreen(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = "📝",
-                        style = MaterialTheme.typography.displayLarge
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
                         text = "No sessions yet",
                         style = MaterialTheme.typography.headlineSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -358,7 +353,7 @@ private fun SessionDetailScreen(
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(
-                                text = "📋 Session Summary",
+                                text = "Session Summary",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
@@ -400,7 +395,7 @@ private fun TranslationCard(translation: Translation) {
             .clickable { isExpanded = !isExpanded },
         colors = CardDefaults.cardColors(
             containerColor = if (translation.containsJargon)
-                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
             else
                 MaterialTheme.colorScheme.surfaceVariant
         )
@@ -420,9 +415,9 @@ private fun TranslationCard(translation: Translation) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (translation.containsJargon) {
                         Text(
-                            text = "⚠️ Jargon",
+                            text = "Jargon",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.tertiary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                     }
@@ -462,7 +457,7 @@ private fun TranslationCard(translation: Translation) {
                             Text(
                                 text = terms.split(",").joinToString(", "),
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error
+                                color = MaterialTheme.colorScheme.tertiary
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                         }

@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * ModelManager handles the selection and initialization of LLM models.
@@ -47,6 +49,7 @@ class ModelManager(private val context: Context) {
     private val _currentModelType = MutableStateFlow<ModelType?>(null)
     val currentModelType: StateFlow<ModelType?> = _currentModelType
 
+    private val modelMutex = Mutex()
     private var aiCoreModel: GenerativeModel? = null
     private var mediaPipeService: MediaPipeLLMService? = null
 
@@ -63,9 +66,9 @@ class ModelManager(private val context: Context) {
 
             // Try to create a GenerativeModel to check AICore availability
             // This will fail gracefully if AICore is not available
-            val testModel = Generation.getClient()
+            Generation.getClient()
             true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
@@ -92,8 +95,15 @@ class ModelManager(private val context: Context) {
      * Initialize the appropriate model based on device support and user preference.
      * If AICore is not supported, automatically fallback to MediaPipe.
      */
-    suspend fun initializeModel(modelPath: String? = null) {
+    private fun cleanupCurrentBackend() {
+        aiCoreModel = null
+        mediaPipeService?.cleanup()
+        mediaPipeService = null
+    }
+
+    suspend fun initializeModel(modelPath: String? = null) = modelMutex.withLock {
         _modelStatus.value = ModelStatus.Checking
+        cleanupCurrentBackend()
 
         try {
             val aiCoreSupported = isAICoreSupported()
@@ -113,25 +123,31 @@ class ModelManager(private val context: Context) {
                 initializeAICore()
             } else {
                 if (modelPath.isNullOrEmpty()) {
-                    _modelStatus.value = ModelStatus.Error("MediaPipe model path not provided")
-                    return
+                    _modelStatus.value = ModelStatus.Error(
+                        "MediaPipe model file not found. Download Gemma 2B from the Settings screen."
+                    )
+                    return@withLock
                 }
                 initializeMediaPipe(modelPath)
             }
         } catch (e: Exception) {
-            _modelStatus.value = ModelStatus.Error("Failed to initialize model: ${e.message}")
+            val modelType = if (_currentModelType.value is ModelType.AICore) "AICore" else "MediaPipe"
+            _modelStatus.value = ModelStatus.Error(
+                "Could not initialize $modelType model. Check that the model file exists and is not corrupted. Details: ${e.message}"
+            )
         }
     }
 
     /**
      * Initialize AICore (Gemini Nano) model.
      */
-    private suspend fun initializeAICore() {
+    private fun initializeAICore() {
         try {
             aiCoreModel = Generation.getClient()
             _currentModelType.value = ModelType.AICore
             _modelStatus.value = ModelStatus.Ready(ModelType.AICore)
         } catch (e: Exception) {
+            _currentModelType.value = null
             _modelStatus.value = ModelStatus.Error("Failed to initialize AICore: ${e.message}")
         }
     }
@@ -146,6 +162,7 @@ class ModelManager(private val context: Context) {
             _currentModelType.value = ModelType.MediaPipe
             _modelStatus.value = ModelStatus.Ready(ModelType.MediaPipe)
         } catch (e: Exception) {
+            _currentModelType.value = null
             _modelStatus.value = ModelStatus.Error("Failed to initialize MediaPipe: ${e.message}")
         }
     }
@@ -153,8 +170,8 @@ class ModelManager(private val context: Context) {
     /**
      * Generate text using the currently active model.
      */
-    suspend fun generateText(prompt: String): String {
-        return when (_currentModelType.value) {
+    suspend fun generateText(prompt: String): String = modelMutex.withLock {
+        when (_currentModelType.value) {
             is ModelType.AICore -> {
                 val model = aiCoreModel ?: throw IllegalStateException("AICore model not initialized")
                 val response = model.generateContent(prompt)

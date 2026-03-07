@@ -39,18 +39,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.jibberish.api.GroqApiService
-import com.example.jibberish.managers.ApiKeyManager
 import com.example.jibberish.managers.AudioRecorderManager
 import com.example.jibberish.managers.DataRetentionManager
 import com.example.jibberish.managers.JargonManager
+import com.example.jibberish.managers.ModelDownloadManager
 import com.example.jibberish.managers.ModelManager
 import com.example.jibberish.managers.SessionManager
+import com.example.jibberish.managers.SarvamSTTService
+import org.json.JSONObject
 import com.example.jibberish.ui.screens.HistoryScreen
 import com.example.jibberish.ui.screens.SettingsScreen
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var modelManager: ModelManager
@@ -58,35 +59,63 @@ class MainActivity : ComponentActivity() {
     private lateinit var audioRecorderManager: AudioRecorderManager
     private lateinit var sessionManager: SessionManager
     private lateinit var dataRetentionManager: DataRetentionManager
-    private lateinit var apiKeyManager: ApiKeyManager
+    private lateinit var sarvamService: SarvamSTTService
+    private lateinit var modelDownloadManager: ModelDownloadManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        apiKeyManager = ApiKeyManager(this)
-        modelManager = ModelManager(this)
-        dataRetentionManager = DataRetentionManager(this)
-        jargonManager = JargonManager(this, modelManager)
-        sessionManager = SessionManager(this, modelManager)
+        sarvamService = SarvamSTTService(applicationContext)
+        modelDownloadManager = ModelDownloadManager(applicationContext)
+        modelManager = ModelManager(applicationContext)
+        dataRetentionManager = DataRetentionManager(applicationContext)
+        jargonManager = JargonManager(modelManager)
+        sessionManager = SessionManager(applicationContext, modelManager)
 
-        // Create AudioRecorderManager with callback that transcribes audio chunks
-        audioRecorderManager = AudioRecorderManager(this) { audioFile ->
-            val apiKey = apiKeyManager.getApiKeyOnce()
-            if (apiKey.isNotBlank()) {
-                val groqService = GroqApiService(apiKey)
-                val result = groqService.transcribeAudio(audioFile)
-                result.onSuccess { transcription ->
-                    if (transcription.isNotBlank() && !isWhisperHallucination(transcription)) {
-                        audioRecorderManager.updateTranscription(transcription)
-                        jargonManager.analyzeJargon(transcription)
+        // Create AudioRecorderManager with callback that transcribes audio chunks via Sarvam API
+        audioRecorderManager = AudioRecorderManager(applicationContext) { audioFile ->
+            val result = sarvamService.transcribeAudio(audioFile)
+            result.onSuccess { transcription ->
+                if (transcription.isNotBlank() && !isWhisperHallucination(transcription)) {
+                    audioRecorderManager.updateTranscription(transcription)
+                    val jargonResult = jargonManager.analyzeJargon(transcription)
+                    // Always persist transcription; add jargon metadata when available
+                    when (jargonResult) {
+                        is JargonManager.JargonResult.Success -> {
+                            sessionManager.addTranslation(
+                                originalText = jargonResult.sentence,
+                                jsonOutput = "",
+                                containsJargon = jargonResult.containsJargon,
+                                jargonTerms = jargonResult.jargonMeanings,
+                                simplifiedMeaning = jargonResult.simplifiedMeaning
+                            )
+                        }
+                        is JargonManager.JargonResult.Error -> {
+                            sessionManager.addTranslation(
+                                originalText = transcription,
+                                jsonOutput = "",
+                                containsJargon = false,
+                                jargonTerms = emptyMap(),
+                                simplifiedMeaning = null
+                            )
+                        }
                     }
                 }
             }
+            result.onFailure { e ->
+                e.printStackTrace()
+            }
         }
 
-        // Initialize model
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-            modelManager.initializeModel()
+        // Initialize LLM model (MediaPipe path from download manager, null triggers AICore fallback)
+        lifecycleScope.launch(Dispatchers.IO) {
+            val mediaPipeModelPath = modelDownloadManager.getModelPath()
+            modelManager.initializeModel(mediaPipeModelPath)
+        }
+
+        // Load saved Sarvam API key (status becomes Ready if key exists)
+        lifecycleScope.launch(Dispatchers.IO) {
+            sarvamService.initialize()
         }
 
         setContent {
@@ -96,8 +125,9 @@ class MainActivity : ComponentActivity() {
                     jargonManager = jargonManager,
                     sessionManager = sessionManager,
                     dataRetentionManager = dataRetentionManager,
-                    apiKeyManager = apiKeyManager,
-                    modelManager = modelManager
+                    modelManager = modelManager,
+                    modelDownloadManager = modelDownloadManager,
+                    sarvamService = sarvamService
                 )
             }
         }
@@ -105,9 +135,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        audioRecorderManager.release()
-        jargonManager.close()
-        modelManager.cleanup()
+        if (isFinishing) {
+            // Full cleanup only when truly finishing (not config change)
+            audioRecorderManager.destroy()
+            jargonManager.close()
+            sessionManager.close()
+            dataRetentionManager.close()
+            modelManager.cleanup()
+            modelDownloadManager.close()
+            sarvamService.close()
+        } else {
+            // Config change — release recorder but let in-flight work complete
+            audioRecorderManager.release()
+        }
     }
 }
 
@@ -117,18 +157,27 @@ class MainActivity : ComponentActivity() {
 private fun isWhisperHallucination(text: String): Boolean {
     val normalized = text.trim().lowercase().removeSuffix(".").removeSuffix("!").trim()
     val hallucinations = setOf(
-        "thank you",
         "thanks for watching",
         "thanks for listening",
-        "subscribe",
         "please subscribe",
         "like and subscribe",
-        "bye",
-        "goodbye",
-        "you",
         "the end",
     )
     return normalized in hallucinations
+}
+
+/**
+ * Parses jargon terms from stored string.
+ * Supports JSON object format {"term":"meaning"} and legacy comma-separated format.
+ */
+internal fun parseJargonTerms(stored: String): List<Pair<String, String>> {
+    return try {
+        val json = JSONObject(stored)
+        json.keys().asSequence().map { key -> key to json.optString(key, "") }.toList()
+    } catch (_: Exception) {
+        // Fallback: old comma-separated format (no individual meanings)
+        stored.split(",").map { it.trim() }.filter { it.isNotBlank() }.map { it to "" }
+    }
 }
 
 // Data class for jargon items in the list
@@ -145,13 +194,24 @@ fun MainAppStructure(
     jargonManager: JargonManager,
     sessionManager: SessionManager,
     dataRetentionManager: DataRetentionManager,
-    apiKeyManager: ApiKeyManager,
-    modelManager: ModelManager
+    modelManager: ModelManager,
+    modelDownloadManager: ModelDownloadManager,
+    sarvamService: SarvamSTTService
 ) {
     var currentScreen by remember { mutableStateOf("home") }
 
     // Track if there's a new summary notification for History tab
     var hasNewSummary by remember { mutableStateOf(false) }
+
+    // Auto-reinit LLM after Gemma download completes
+    val gemmaDownloadState by modelDownloadManager.downloadState.collectAsState()
+    LaunchedEffect(gemmaDownloadState) {
+        if (gemmaDownloadState is ModelDownloadManager.DownloadState.Completed) {
+            modelManager.initializeModel(
+                (gemmaDownloadState as ModelDownloadManager.DownloadState.Completed).modelPath
+            )
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -202,14 +262,15 @@ fun MainAppStructure(
                     audioRecorderManager = audioRecorderManager,
                     jargonManager = jargonManager,
                     sessionManager = sessionManager,
-                    apiKeyManager = apiKeyManager,
+                    sarvamService = sarvamService,
                     onSummaryGenerated = { hasNewSummary = true }
                 )
                 "history" -> HistoryScreen(sessionManager)
                 "settings" -> SettingsScreen(
                     dataRetentionManager = dataRetentionManager,
-                    apiKeyManager = apiKeyManager,
-                    modelManager = modelManager
+                    modelManager = modelManager,
+                    modelDownloadManager = modelDownloadManager,
+                    sarvamService = sarvamService
                 )
             }
         }
@@ -222,24 +283,49 @@ fun HomeScreen(
     audioRecorderManager: AudioRecorderManager,
     jargonManager: JargonManager,
     sessionManager: SessionManager,
-    apiKeyManager: ApiKeyManager,
+    sarvamService: SarvamSTTService,
     onSummaryGenerated: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val textState by audioRecorderManager.transcribedText.collectAsState()
     val isRecording by audioRecorderManager.isRecording.collectAsState()
     val modelStatus by jargonManager.modelStatus.collectAsState()
-    val jargonAnalysis by jargonManager.lastAnalysis.collectAsState()
     val isSessionActive by sessionManager.isSessionActive.collectAsState()
     val sessionStatus by sessionManager.sessionStatus.collectAsState()
     val currentTranslations by sessionManager.currentTranslations.collectAsState()
-    val hasApiKey by apiKeyManager.hasApiKey().collectAsState(initial = false)
+    val sttStatus by sarvamService.status.collectAsState()
     val scope = rememberCoroutineScope()
 
-    // List of jargon items detected during the session
-    var jargonItems by remember { mutableStateOf<List<JargonItem>>(emptyList()) }
-    var unreadJargonCount by remember { mutableIntStateOf(0) }
+    // Derive jargon items from source-of-truth (persisted translations) — survives navigation
+    val jargonItems = currentTranslations
+        .filter { it.containsJargon && !it.jargonTerms.isNullOrBlank() }
+        .flatMap { translation ->
+            parseJargonTerms(translation.jargonTerms!!).map { (term, meaning) ->
+                JargonItem(
+                    id = "${translation.translationId}_$term",
+                    jargon = term,
+                    meaning = meaning.ifBlank { translation.simplifiedMeaning ?: "" },
+                    timestamp = translation.timestamp
+                )
+            }
+        }
+    var lastSeenJargonCount by remember { mutableIntStateOf(0) }
+    val unreadJargonCount = (jargonItems.size - lastSeenJargonCount).coerceAtLeast(0)
     val jargonListState = rememberLazyListState()
+
+    // Reset unread counter when session ends
+    LaunchedEffect(isSessionActive) {
+        if (!isSessionActive) {
+            lastSeenJargonCount = 0
+        }
+    }
+
+    // Auto-scroll when new jargon items appear
+    LaunchedEffect(jargonItems.size) {
+        if (jargonItems.isNotEmpty() && jargonItems.size > lastSeenJargonCount) {
+            jargonListState.animateScrollToItem(jargonItems.size - 1)
+        }
+    }
 
     var hasPermission: Boolean by remember {
         mutableStateOf(
@@ -252,56 +338,13 @@ fun HomeScreen(
         onResult = { isGranted -> hasPermission = isGranted }
     )
 
-    // Auto-start session when app opens
-    LaunchedEffect(Unit) {
-        if (!isSessionActive && hasPermission && hasApiKey) {
-            sessionManager.startSession()
-            if (modelStatus is JargonManager.ModelStatus.Ready) {
-                audioRecorderManager.startRecording()
-            }
-        }
-    }
-
-    // Auto-start recording when permission is granted and session starts
-    LaunchedEffect(hasPermission, isSessionActive, modelStatus, hasApiKey) {
-        if (hasPermission && isSessionActive && hasApiKey &&
-            modelStatus is JargonManager.ModelStatus.Ready && !isRecording
+    // Auto-start recording when permission is granted and session starts (after manual toggle)
+    LaunchedEffect(hasPermission, isSessionActive, modelStatus, sttStatus) {
+        if (hasPermission && isSessionActive &&
+            modelStatus is JargonManager.ModelStatus.Ready &&
+            sttStatus is SarvamSTTService.SttStatus.Ready && !isRecording
         ) {
             audioRecorderManager.startRecording()
-        }
-    }
-
-    // Track jargon analysis results, add to UI list, and save to database
-    LaunchedEffect(jargonAnalysis) {
-        jargonAnalysis?.let { analysis ->
-            if (analysis is JargonManager.JargonResult.Success) {
-                // Save to database if session is active
-                if (isSessionActive) {
-                    sessionManager.addTranslation(
-                        originalText = analysis.sentence,
-                        jsonOutput = "",
-                        containsJargon = analysis.containsJargon,
-                        jargonTerms = analysis.jargons,
-                        simplifiedMeaning = analysis.simplifiedMeaning
-                    )
-                }
-
-                // Add to UI list if contains jargon
-                if (analysis.containsJargon) {
-                    analysis.jargons.forEach { jargon ->
-                        val newItem = JargonItem(
-                            jargon = jargon,
-                            meaning = analysis.simplifiedMeaning
-                        )
-                        jargonItems = jargonItems + newItem
-                        unreadJargonCount++
-                    }
-                    // Auto-scroll to bottom when new items are added
-                    if (jargonItems.isNotEmpty()) {
-                        jargonListState.animateScrollToItem(jargonItems.size - 1)
-                    }
-                }
-            }
         }
     }
 
@@ -313,25 +356,6 @@ fun HomeScreen(
     ) {
         Spacer(modifier = Modifier.height(8.dp))
 
-        // API key warning
-        if (!hasApiKey) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Text(
-                    text = "Groq API key not configured. Go to Settings to add your API key.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
         // Top Bar - Session Control
         SessionControlBar(
             isSessionActive = isSessionActive,
@@ -342,7 +366,7 @@ fun HomeScreen(
                 scope.launch {
                     if (shouldActivate) {
                         sessionManager.startSession()
-                        if (hasPermission && hasApiKey && modelStatus is JargonManager.ModelStatus.Ready) {
+                        if (hasPermission && modelStatus is JargonManager.ModelStatus.Ready) {
                             audioRecorderManager.startRecording()
                         }
                     } else {
@@ -351,9 +375,6 @@ fun HomeScreen(
                         if (session?.generatedSummary != null) {
                             onSummaryGenerated()
                         }
-                        // Clear jargon items when session ends
-                        jargonItems = emptyList()
-                        unreadJargonCount = 0
                     }
                 }
             },
@@ -362,15 +383,24 @@ fun HomeScreen(
             },
             hasPermission = hasPermission,
             modelReady = modelStatus is JargonManager.ModelStatus.Ready,
-            hasApiKey = hasApiKey
+            sttStatus = sttStatus
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Error card — auto-hides when no errors
+        ErrorCard(
+            sttError = (sttStatus as? SarvamSTTService.SttStatus.Error)?.message,
+            modelError = (modelStatus as? JargonManager.ModelStatus.Error)?.message
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Transcription Area
         TranscriptionCard(
             text = textState,
             isRecording = isRecording,
+            isTranscribing = sttStatus is SarvamSTTService.SttStatus.Transcribing,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(0.3f)
@@ -383,11 +413,49 @@ fun HomeScreen(
             jargonItems = jargonItems,
             unreadCount = unreadJargonCount,
             listState = jargonListState,
-            onClearUnread = { unreadJargonCount = 0 },
+            onClearUnread = { lastSeenJargonCount = jargonItems.size },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(0.7f)
         )
+    }
+}
+
+@Composable
+private fun ErrorCard(
+    sttError: String?,
+    modelError: String?
+) {
+    if (sttError == null && modelError == null) return
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            sttError?.let {
+                Text(
+                    text = "Speech-to-text: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (sttError != null && modelError != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+            }
+            modelError?.let {
+                Text(
+                    text = "AI model: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }
 
@@ -401,10 +469,11 @@ private fun SessionControlBar(
     onRequestPermission: () -> Unit,
     hasPermission: Boolean,
     modelReady: Boolean,
-    hasApiKey: Boolean
+    sttStatus: SarvamSTTService.SttStatus
 ) {
     val isLoading = sessionStatus is SessionManager.SessionStatus.Starting ||
-            sessionStatus is SessionManager.SessionStatus.GeneratingSummary
+            sessionStatus is SessionManager.SessionStatus.GeneratingSummary ||
+            (isSessionActive && sttStatus is SarvamSTTService.SttStatus.Transcribing)
 
     val backgroundColor by animateColorAsState(
         targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
@@ -428,8 +497,12 @@ private fun SessionControlBar(
                     text = when {
                         sessionStatus is SessionManager.SessionStatus.GeneratingSummary -> "Generating Summary..."
                         sessionStatus is SessionManager.SessionStatus.Starting -> "Starting Session..."
+                        sttStatus is SarvamSTTService.SttStatus.Transcribing -> "Transcribing..."
                         isSessionActive && isRecording -> "Listening"
                         isSessionActive -> "Session Active"
+                        sttStatus is SarvamSTTService.SttStatus.NotConfigured -> "Add Sarvam API key in Settings"
+                        sttStatus is SarvamSTTService.SttStatus.Error -> "STT error — see Settings"
+                        !modelReady -> "Loading AI model..."
                         else -> "Toggle to start"
                     },
                     style = MaterialTheme.typography.titleMedium,
@@ -461,7 +534,7 @@ private fun SessionControlBar(
                             onToggle(shouldActivate)
                         }
                     },
-                    enabled = modelReady && hasApiKey,
+                    enabled = isSessionActive || (modelReady && sttStatus is SarvamSTTService.SttStatus.Ready),
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = Color.White.copy(alpha = 0.3f),
@@ -511,8 +584,16 @@ private fun AudioWaveIndicator(modifier: Modifier = Modifier) {
 private fun TranscriptionCard(
     text: String,
     isRecording: Boolean,
+    isTranscribing: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val scrollState = rememberScrollState()
+
+    // Auto-scroll to the bottom whenever new transcription text arrives
+    LaunchedEffect(text) {
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
     Card(
         modifier = modifier,
         colors = CardDefaults.cardColors(
@@ -535,16 +616,21 @@ private fun TranscriptionCard(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
-                if (isRecording) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    AudioWaveIndicator()
+                Spacer(modifier = Modifier.width(8.dp))
+                when {
+                    isTranscribing -> Text(
+                        text = "Processing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    isRecording -> AudioWaveIndicator()
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(scrollState)
             ) {
                 Text(
                     text = text,

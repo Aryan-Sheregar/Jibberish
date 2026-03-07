@@ -12,7 +12,7 @@ import com.example.jibberish.data.entities.Translation
 @Database(
     entities = [Session::class, Translation::class],
     version = 1,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class JibberishDatabase : RoomDatabase() {
     
@@ -30,7 +30,6 @@ abstract class JibberishDatabase : RoomDatabase() {
                     JibberishDatabase::class.java,
                     "jibberish_database"
                 )
-                .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance
                 instance

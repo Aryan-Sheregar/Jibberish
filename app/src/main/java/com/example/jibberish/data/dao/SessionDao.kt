@@ -62,6 +62,10 @@ interface SessionDao {
     // Get session count for statistics
     @Query("SELECT COUNT(*) FROM sessions WHERE is_active = 0")
     suspend fun getCompletedSessionCount(): Int
+
+    // Get session count as observable Flow
+    @Query("SELECT COUNT(*) FROM sessions WHERE is_active = 0")
+    fun getCompletedSessionCountFlow(): Flow<Int>
     
     // Delete all completed sessions
     @Query("DELETE FROM sessions WHERE is_active = 0")

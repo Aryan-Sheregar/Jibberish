@@ -16,16 +16,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -33,7 +33,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -46,41 +45,32 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.example.jibberish.managers.ApiKeyManager
 import com.example.jibberish.managers.DataRetentionManager
+import com.example.jibberish.managers.ModelDownloadManager
 import com.example.jibberish.managers.ModelManager
+import com.example.jibberish.managers.SarvamSTTService
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     dataRetentionManager: DataRetentionManager,
-    apiKeyManager: ApiKeyManager,
-    modelManager: ModelManager
+    modelManager: ModelManager,
+    modelDownloadManager: ModelDownloadManager,
+    sarvamService: SarvamSTTService
 ) {
     val currentRetentionDays by dataRetentionManager.getRetentionDays().collectAsState(initial = DataRetentionManager.DEFAULT_RETENTION_DAYS)
-    val currentApiKey by apiKeyManager.getApiKey().collectAsState(initial = "")
     val modelStatus by modelManager.modelStatus.collectAsState()
     val currentModelType by modelManager.currentModelType.collectAsState()
+    val downloadState by modelDownloadManager.downloadState.collectAsState()
+    val sttStatus by sarvamService.status.collectAsState()
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
-    var sessionCount by remember { mutableIntStateOf(0) }
-    var apiKeyInput by remember { mutableStateOf("") }
-    var apiKeySaved by remember { mutableStateOf(false) }
+    val sessionCount by dataRetentionManager.getCompletedSessionCountFlow().collectAsState(initial = 0)
     val scope = rememberCoroutineScope()
 
-    // Initialize API key input field
-    LaunchedEffect(currentApiKey) {
-        if (apiKeyInput.isEmpty() && currentApiKey.isNotEmpty()) {
-            apiKeyInput = currentApiKey
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        val stats = dataRetentionManager.getDataStatistics()
-        sessionCount = stats.sessionCount
-    }
+    val gemmaModelPath = remember { modelDownloadManager.getModelPath() }
 
     if (showRetentionDialog) {
         RetentionPeriodDialog(
@@ -101,14 +91,13 @@ fun SettingsScreen(
             icon = { Icon(Icons.Default.Delete, contentDescription = null) },
             title = { Text("Clear All Data?") },
             text = {
-                Text("This will permanently delete all $sessionCount sessions and their translations. This action cannot be undone.")
+                Text("This will permanently delete all $sessionCount completed sessions and their translations. This action cannot be undone.")
             },
             confirmButton = {
                 TextButton(
                     onClick = {
                         scope.launch {
                             dataRetentionManager.clearAllData()
-                            sessionCount = 0
                         }
                         showClearDataDialog = false
                     }
@@ -132,7 +121,8 @@ fun SettingsScreen(
             onConfirm = { modelType ->
                 scope.launch {
                     modelManager.setModelPreference(modelType)
-                    modelManager.initializeModel()
+                    val resolvedPath = modelDownloadManager.getModelPath()
+                    modelManager.initializeModel(resolvedPath)
                 }
                 showModelDialog = false
             }
@@ -154,64 +144,19 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // API Configuration Section
+            // Speech Recognition Section
             Text(
-                text = "API Configuration",
+                text = "Speech Recognition",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
 
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Groq API Key",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Required for speech-to-text transcription (Whisper)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = apiKeyInput,
-                        onValueChange = {
-                            apiKeyInput = it
-                            apiKeySaved = false
-                        },
-                        label = { Text("API Key") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    apiKeyManager.setApiKey(apiKeyInput)
-                                    apiKeySaved = true
-                                }
-                            },
-                            enabled = apiKeyInput.isNotBlank() && apiKeyInput != currentApiKey
-                        ) {
-                            Text("Save")
-                        }
-                        if (apiKeySaved) {
-                            Text(
-                                text = "Saved",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
-            }
+            SarvamApiKeyCard(
+                sarvamService = sarvamService,
+                sttStatus = sttStatus,
+                scope = scope
+            )
 
             // AI Model Section
             Text(
@@ -261,6 +206,14 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            // Gemma 2B download card — always shown so it can always be downloaded
+            GemmaDownloadCard(
+                downloadState = downloadState,
+                existingModelPath = gemmaModelPath,
+                onDownload = { modelDownloadManager.startDownload() },
+                onCancel = { modelDownloadManager.cancelDownload() }
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -325,7 +278,7 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.error
                             )
                             Text(
-                                text = "$sessionCount sessions stored",
+                                text = "$sessionCount completed sessions stored",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -339,76 +292,132 @@ fun SettingsScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
 
-            // About Section
+@Composable
+private fun SarvamApiKeyCard(
+    sarvamService: SarvamSTTService,
+    sttStatus: SarvamSTTService.SttStatus,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    var apiKeyInput by remember { mutableStateOf(sarvamService.getApiKey()) }
+    val isConfigured = sttStatus is SarvamSTTService.SttStatus.Ready ||
+            sttStatus is SarvamSTTService.SttStatus.Transcribing
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "About",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                text = "Sarvam Saaras-V3",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = if (isConfigured) "API key configured" else "API key required for speech-to-text",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isConfigured) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = apiKeyInput,
+                onValueChange = { apiKeyInput = it },
+                label = { Text("API Key") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    scope.launch { sarvamService.setApiKey(apiKeyInput) }
+                },
+                enabled = apiKeyInput.isNotBlank()
+            ) {
+                Text("Save")
+            }
+        }
+    }
+}
+
+@Composable
+private fun GemmaDownloadCard(
+    downloadState: ModelDownloadManager.DownloadState,
+    existingModelPath: String?,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Gemma 2B Model",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
             )
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "Jibberish",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Version 1.0",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
+            when {
+                downloadState is ModelDownloadManager.DownloadState.Completed ||
+                existingModelPath != null && downloadState is ModelDownloadManager.DownloadState.Idle -> {
+                    val path = (downloadState as? ModelDownloadManager.DownloadState.Completed)?.modelPath
+                        ?: existingModelPath ?: ""
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Jibberish uses on-device AI to detect and simplify corporate jargon in real-time. Audio is transcribed via Groq's Whisper API, while jargon analysis runs locally on your device.",
-                        style = MaterialTheme.typography.bodyMedium
+                        text = "Ready",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = path,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            }
 
-            // Privacy Note
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
+                downloadState is ModelDownloadManager.DownloadState.Downloading -> {
+                    val state = downloadState
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Privacy Note",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(end = 12.dp)
+                        text = "${state.progressPercent}%  —  ${"%.1f".format(state.downloadedMb)} / ${"%.1f".format(state.totalMb)} MB",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { state.progressPercent / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = onCancel) {
+                        Text("Cancel")
+                    }
+                }
+
+                downloadState is ModelDownloadManager.DownloadState.Failed -> {
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Audio chunks are sent to Groq for transcription. Jargon analysis and all data storage remain on-device. Your Groq API key is stored locally.",
-                        style = MaterialTheme.typography.bodySmall
+                        text = downloadState.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = onDownload) {
+                        Text("Retry Download")
+                    }
+                }
+
+                else -> {
+                    // Idle, model not on disk
+                    Text(
+                        text = "Required for MediaPipe (Gemma 2B) inference. ~1.5 GB download.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = onDownload) {
+                        Text("Download Model")
+                    }
                 }
             }
         }

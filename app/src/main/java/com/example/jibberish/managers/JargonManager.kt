@@ -1,8 +1,9 @@
 package com.example.jibberish.managers
 
-import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,33 +11,30 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class JargonManager(
-    private val context: Context,
     private val modelManager: ModelManager
 ) {
 
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val _modelStatus = MutableStateFlow<ModelStatus>(ModelStatus.Checking)
     val modelStatus: StateFlow<ModelStatus> = _modelStatus.asStateFlow()
 
-    private val _lastAnalysis = MutableStateFlow<JargonResult?>(null)
-    val lastAnalysis: StateFlow<JargonResult?> = _lastAnalysis.asStateFlow()
-
     // System prompt for jargon identification
     private val systemPrompt = """
-You are a jargon detection assistant. Analyze the given text and identify any business jargon, corporate speak, or technical terms.
+You are a jargon detection assistant. Analyze the given text and identify any business jargon, corporate speak, or technical terms. Provide the meaning of each jargon term individually.
 
 Return your response as JSON in this EXACT format:
 {
   "contains_jargon": true,
   "sentence": "original sentence here",
-  "jargons": ["term1", "term2"],
-  "simplified_meaning": "plain language explanation"
+  "jargons": {"term1": "plain meaning of term1", "term2": "plain meaning of term2"},
+  "simplified_meaning": "plain language version of the full sentence"
 }
 
 If there is NO jargon, return:
 {
   "contains_jargon": false,
   "sentence": "original sentence here",
-  "jargons": [],
+  "jargons": {},
   "simplified_meaning": "The sentence is already clear and straightforward."
 }
 
@@ -44,7 +42,7 @@ Always respond with valid JSON only, no additional text or markdown.
 """.trimIndent()
 
     init {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             observeModelStatus()
         }
     }
@@ -67,15 +65,10 @@ Always respond with valid JSON only, no additional text or markdown.
             val fullPrompt = "$systemPrompt\n\nAnalyze this text: \"$speechInput\""
 
             val resultText = modelManager.generateText(fullPrompt)
-            val result = parseJsonResult(resultText, speechInput)
-
-            _lastAnalysis.value = result
-            result
+            parseJsonResult(resultText, speechInput)
 
         } catch (e: Exception) {
-            val errorResult = JargonResult.Error("Error: ${e.localizedMessage ?: e.message}")
-            _lastAnalysis.value = errorResult
-            errorResult
+            JargonResult.Error("Error: ${e.localizedMessage ?: e.message}")
         }
     }
 
@@ -92,11 +85,20 @@ Always respond with valid JSON only, no additional text or markdown.
             val containsJargon = json.optBoolean("contains_jargon", false)
             val sentence = json.optString("sentence", originalText)
 
-            val jargonList = mutableListOf<String>()
-            val jargonArray = json.optJSONArray("jargons")
-            if (jargonArray != null) {
-                for (i in 0 until jargonArray.length()) {
-                    jargonList.add(jargonArray.getString(i))
+            val jargonMeanings = mutableMapOf<String, String>()
+            val jargonsValue = json.opt("jargons")
+            when (jargonsValue) {
+                is JSONObject -> {
+                    jargonsValue.keys().forEach { key ->
+                        jargonMeanings[key] = jargonsValue.optString(key, "")
+                    }
+                }
+                is org.json.JSONArray -> {
+                    // Fallback: LLM returned old array format — use simplified_meaning for all
+                    val fallbackMeaning = json.optString("simplified_meaning", "")
+                    for (i in 0 until jargonsValue.length()) {
+                        jargonMeanings[jargonsValue.getString(i)] = fallbackMeaning
+                    }
                 }
             }
 
@@ -105,7 +107,7 @@ Always respond with valid JSON only, no additional text or markdown.
             JargonResult.Success(
                 containsJargon = containsJargon,
                 sentence = sentence,
-                jargons = jargonList,
+                jargonMeanings = jargonMeanings,
                 simplifiedMeaning = simplifiedMeaning
             )
 
@@ -115,12 +117,11 @@ Always respond with valid JSON only, no additional text or markdown.
     }
 
     fun close() {
-        // No-op
+        scope.cancel()
     }
 
     sealed interface ModelStatus {
         data object Checking : ModelStatus
-        data object Downloading : ModelStatus
         data object Ready : ModelStatus
         data class Error(val message: String) : ModelStatus
     }
@@ -129,7 +130,7 @@ Always respond with valid JSON only, no additional text or markdown.
         data class Success(
             val containsJargon: Boolean,
             val sentence: String,
-            val jargons: List<String>,
+            val jargonMeanings: Map<String, String>,
             val simplifiedMeaning: String
         ) : JargonResult
 

@@ -38,7 +38,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +53,7 @@ import com.example.jibberish.data.entities.Session
 import com.example.jibberish.data.entities.SessionWithTranslations
 import com.example.jibberish.data.entities.Translation
 import com.example.jibberish.managers.SessionManager
+import com.example.jibberish.parseJargonTerms
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -388,16 +388,13 @@ private fun SessionDetailScreen(
 @Composable
 private fun TranslationCard(translation: Translation) {
     var isExpanded by remember { mutableStateOf(false) }
-    
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { isExpanded = !isExpanded },
         colors = CardDefaults.cardColors(
-            containerColor = if (translation.containsJargon)
-                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-            else
-                MaterialTheme.colorScheme.surfaceVariant
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -411,32 +408,35 @@ private fun TranslationCard(translation: Translation) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (translation.containsJargon) {
                         Text(
                             text = "Jargon",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                     }
                     Icon(
                         imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                         contentDescription = if (isExpanded) "Collapse" else "Expand",
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             Text(
                 text = translation.originalText,
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
             )
-            
+
             AnimatedVisibility(
                 visible = isExpanded,
                 enter = expandVertically() + fadeIn(),
@@ -445,33 +445,58 @@ private fun TranslationCard(translation: Translation) {
                 Column {
                     if (translation.containsJargon) {
                         Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider()
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         Spacer(modifier = Modifier.height(12.dp))
-                        
+
                         translation.jargonTerms?.let { terms ->
-                            Text(
-                                text = "Jargon Terms:",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = terms.split(",").joinToString(", "),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.tertiary
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
+                            val parsed = parseJargonTerms(terms)
+                            val hasIndividualMeanings = parsed.any { it.second.isNotBlank() }
+
+                            if (hasIndividualMeanings) {
+                                // New format: each term has its own meaning
+                                parsed.forEach { (term, meaning) ->
+                                    Text(
+                                        text = term,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = meaning.ifBlank { "—" },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
+                            } else {
+                                // Old comma-separated format: show terms, then simplifiedMeaning as explanation
+                                Text(
+                                    text = "Jargon Terms:",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = parsed.joinToString(", ") { it.first },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
                         }
-                        
-                        translation.simplifiedMeaning?.let { simplified ->
+
+                        translation.simplifiedMeaning?.takeIf { it.isNotBlank() }?.let { simplified ->
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = "Simplified:",
                                 style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
                             )
                             Text(
                                 text = simplified,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }

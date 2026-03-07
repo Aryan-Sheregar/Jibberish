@@ -7,11 +7,14 @@ import com.example.jibberish.data.entities.SessionWithTranslations
 import com.example.jibberish.data.entities.Translation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * SessionManager handles the session-based architecture for batch translation processing.
@@ -22,16 +25,16 @@ import kotlinx.coroutines.launch
  * 3. User toggles session OFF -> endSession() generates summary
  */
 class SessionManager(
-    private val context: Context,
+    context: Context,
     private val modelManager: ModelManager
 ) {
 
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val database = JibberishDatabase.getDatabase(context)
     private val sessionDao = database.sessionDao()
     private val translationDao = database.translationDao()
 
     private val _currentSession = MutableStateFlow<Session?>(null)
-    val currentSession: StateFlow<Session?> = _currentSession.asStateFlow()
 
     private val _isSessionActive = MutableStateFlow(false)
     val isSessionActive: StateFlow<Boolean> = _isSessionActive.asStateFlow()
@@ -54,7 +57,7 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
 """.trimIndent()
 
     init {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             // Check for any active session from previous app launch
             val activeSession = sessionDao.getActiveSession()
             if (activeSession != null) {
@@ -96,7 +99,7 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
         originalText: String,
         jsonOutput: String,
         containsJargon: Boolean,
-        jargonTerms: List<String>,
+        jargonTerms: Map<String, String>,
         simplifiedMeaning: String?
     ): Translation? {
         val session = _currentSession.value ?: return null
@@ -106,7 +109,7 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
             originalText = originalText,
             jsonOutput = jsonOutput,
             containsJargon = containsJargon,
-            jargonTerms = jargonTerms.joinToString(","),
+            jargonTerms = if (jargonTerms.isNotEmpty()) JSONObject(jargonTerms).toString() else null,
             simplifiedMeaning = simplifiedMeaning
         )
 
@@ -181,20 +184,6 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
     }
 
     /**
-     * Cancels the current session without generating a summary.
-     */
-    suspend fun cancelSession() {
-        val session = _currentSession.value ?: return
-
-        sessionDao.deleteSession(session)
-
-        _currentSession.value = null
-        _isSessionActive.value = false
-        _currentTranslations.value = emptyList()
-        _sessionStatus.value = SessionStatus.Idle
-    }
-
-    /**
      * Gets all completed sessions for history display.
      */
     fun getCompletedSessions(): Flow<List<Session>> {
@@ -215,6 +204,10 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
         sessionDao.deleteSession(session)
     }
 
+    fun close() {
+        scope.cancel()
+    }
+
     private suspend fun loadCurrentSessionTranslations(sessionId: String) {
         val translations = translationDao.getTranslationsForSessionSync(sessionId)
         _currentTranslations.value = translations
@@ -225,6 +218,5 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
         data object Starting : SessionStatus
         data object Active : SessionStatus
         data object GeneratingSummary : SessionStatus
-        data class Error(val message: String) : SessionStatus
     }
 }

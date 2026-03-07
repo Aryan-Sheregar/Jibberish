@@ -10,6 +10,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.example.jibberish.data.JibberishDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -30,7 +32,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
  * - Forever (no auto-delete)
  */
 class DataRetentionManager(private val context: Context) {
-    
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val database = JibberishDatabase.getDatabase(context)
     private val sessionDao = database.sessionDao()
     
@@ -58,7 +61,7 @@ class DataRetentionManager(private val context: Context) {
     
     init {
         // Run cleanup on initialization
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             performCleanupIfNeeded()
         }
     }
@@ -135,23 +138,11 @@ class DataRetentionManager(private val context: Context) {
         return sessionDao.deleteAllCompletedSessions()
     }
     
-    /**
-     * Gets statistics about stored data.
-     */
-    suspend fun getDataStatistics(): DataStatistics {
-        val sessionCount = sessionDao.getCompletedSessionCount()
-        val retentionDays = context.dataStore.data.first()[RETENTION_DAYS_KEY] ?: DEFAULT_RETENTION_DAYS
-        
-        return DataStatistics(
-            sessionCount = sessionCount,
-            retentionDays = retentionDays,
-            retentionLabel = getRetentionLabel(retentionDays)
-        )
+    fun getCompletedSessionCountFlow(): Flow<Int> {
+        return sessionDao.getCompletedSessionCountFlow()
     }
-    
-    data class DataStatistics(
-        val sessionCount: Int,
-        val retentionDays: Int,
-        val retentionLabel: String
-    )
+
+    fun close() {
+        scope.cancel()
+    }
 }

@@ -2,13 +2,11 @@ package com.example.jibberish.managers
 
 import android.content.Context
 import android.media.MediaRecorder
-import android.os.Build
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
-import java.io.IOException
 
 class AudioRecorderManager(
     private val context: Context,
@@ -24,32 +22,33 @@ class AudioRecorderManager(
     private var currentRecordingFile: File? = null
     private var shouldBeRecording = false
     private var silenceDetectionJob: Job? = null
+    private val processingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var accumulatedTranscription = StringBuilder()
 
-    // --- FIX 1: Property Setters replace the conflicting functions ---
-    var silenceThreshold: Int = 500
-        set(value) {
-            // Logic moved here to avoid "Platform declaration clash"
-            field = value.coerceIn(0, 32767)
-        }
+    // MediaRecorder.maxAmplitude range: 0–32767
+    // Ambient noise in a quiet room: ~200–800. Normal speech: ~1500–10000.
+    // 1500 is a safe floor that ignores typical background noise.
+    var silenceThreshold: Int = 1500
+        set(value) { field = value.coerceIn(0, 32767) }
 
-    var silenceDurationMs: Long = 1000L
-        set(value) {
-            field = value.coerceAtLeast(100L)
-        }
+    // Wait 1.5 s of continuous silence before closing a chunk.
+    // Increased from 1000ms to allow natural mid-sentence pauses.
+    var silenceDurationMs: Long = 1500L
+        set(value) { field = value.coerceAtLeast(100L) }
 
     var pollingIntervalMs: Long = 100L
+    var maxChunkDurationMs: Long = 15000L   // force chunk after 15 s regardless of silence
+    var minChunkDurationMs: Long = 1500L    // discard chunks shorter than 1.5 s
 
-    // Maximum duration for a single chunk (15 seconds)
-    // This ensures long conversations get chunked even without silence
-    var maxChunkDurationMs: Long = 15000L
-
-    // Minimum chunk duration to avoid sending near-silent chunks to STT
-    // Whisper hallucinates "Thank you." etc. on very short/silent audio
-    var minChunkDurationMs: Long = 1500L
+    // Minimum number of 100ms polling intervals that must have detected speech
+    // before a chunk is forwarded to Whisper.
+    // 8 intervals = at least 800 ms of actual speech in the chunk.
+    private val minSpeechIntervals: Int = 8
 
     private var currentChunkStartTime: Long = 0L
     private var chunkHadSpeech = false
+    private var speechIntervalCount: Int = 0  // intervals where amplitude >= silenceThreshold
+    private var totalIntervalCount: Int = 0   // total polling intervals for current chunk
 
     private val recordingsDir: File by lazy {
         File(context.cacheDir, "audio_recordings").apply {
@@ -62,6 +61,8 @@ class AudioRecorderManager(
 
         shouldBeRecording = true
         _isRecording.value = true
+        // Clear previous session's accumulated text so each session starts fresh
+        accumulatedTranscription.clear()
         _transcribedText.value = "Listening..."
 
         startNewRecording()
@@ -76,20 +77,20 @@ class AudioRecorderManager(
             currentRecordingFile = File(recordingsDir, "recording_${System.currentTimeMillis()}.m4a")
             currentChunkStartTime = System.currentTimeMillis()
             chunkHadSpeech = false
+            speechIntervalCount = 0
+            totalIntervalCount = 0
 
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            mediaRecorder =
                 MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }.apply {
+                    .apply {
                 // Use MIC to capture all ambient audio including other devices
                 setAudioSource(MediaRecorder.AudioSource.MIC)
 
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
+                setAudioEncodingBitRate(32000)
+                setAudioSamplingRate(16000)
+                setAudioChannels(1)
                 setOutputFile(currentRecordingFile?.absolutePath)
 
                 prepare()
@@ -98,15 +99,17 @@ class AudioRecorderManager(
 
             startSilenceDetection()
 
-        } catch (e: IOException) {
+        } catch (e: Exception) {
             e.printStackTrace()
+            shouldBeRecording = false
+            _isRecording.value = false
             _transcribedText.value = "Recording error: ${e.message}"
         }
     }
 
     private fun startSilenceDetection() {
         silenceDetectionJob?.cancel()
-        silenceDetectionJob = CoroutineScope(Dispatchers.IO).launch {
+        silenceDetectionJob = processingScope.launch {
             var silenceStartTime: Long? = null
 
             while (isActive && shouldBeRecording) {
@@ -122,6 +125,7 @@ class AudioRecorderManager(
                     }
 
                     val amplitude = mediaRecorder?.maxAmplitude ?: 0
+                    totalIntervalCount++
 
                     if (amplitude < silenceThreshold) {
                         if (silenceStartTime == null) {
@@ -136,15 +140,16 @@ class AudioRecorderManager(
                     } else {
                         silenceStartTime = null
                         chunkHadSpeech = true
+                        speechIntervalCount++
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // Ignore polling errors
                 }
             }
         }
     }
 
-    private suspend fun processCurrentChunk() {
+    private fun processCurrentChunk() {
         try {
             val chunkDuration = System.currentTimeMillis() - currentChunkStartTime
 
@@ -154,16 +159,26 @@ class AudioRecorderManager(
             }
 
             val recordedFile = currentRecordingFile
-            // Only send chunk if it had speech and meets minimum duration
-            // This prevents Whisper from hallucinating on silent/short audio
-            if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
-                && chunkHadSpeech && chunkDuration >= minChunkDurationMs
-            ) {
-                onAudioChunkReady(recordedFile)
-            }
+            val hadSpeech = chunkHadSpeech
+            val speechCount = speechIntervalCount
 
+            // Start new recording FIRST to minimize gap
             if (shouldBeRecording) {
                 startNewRecording()
+            }
+
+            // Then dispatch chunk processing in background (non-blocking)
+            val hasMeaningfulSpeech = hadSpeech && speechCount >= minSpeechIntervals
+            if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
+                && hasMeaningfulSpeech && chunkDuration >= minChunkDurationMs
+            ) {
+                processingScope.launch {
+                    try {
+                        onAudioChunkReady(recordedFile)
+                    } finally {
+                        recordedFile.delete()
+                    }
+                }
             }
 
         } catch (e: Exception) {
@@ -174,14 +189,14 @@ class AudioRecorderManager(
         }
     }
 
-    fun stopRecording() {
+    suspend fun stopRecording() {
         shouldBeRecording = false
         _isRecording.value = false
 
         silenceDetectionJob?.cancel()
         silenceDetectionJob = null
 
-        CoroutineScope(Dispatchers.IO).launch {
+        withContext(Dispatchers.IO) {
             try {
                 mediaRecorder?.apply {
                     stop()
@@ -189,20 +204,25 @@ class AudioRecorderManager(
                 }
 
                 val recordedFile = currentRecordingFile
-                if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0) {
-                    onAudioChunkReady(recordedFile)
+                val hasMeaningfulSpeech = chunkHadSpeech && speechIntervalCount >= minSpeechIntervals
+                if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
+                    && hasMeaningfulSpeech
+                ) {
+                    try {
+                        onAudioChunkReady(recordedFile)
+                    } finally {
+                        recordedFile.delete()
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
                 releaseMediaRecorder()
             }
-        }
-    }
 
-    fun clearTranscription() {
-        accumulatedTranscription.clear()
-        _transcribedText.value = "Listening..."
+            // Drain all in-flight chunk processing jobs
+            processingScope.coroutineContext[Job]?.children?.forEach { it.join() }
+        }
     }
 
     fun updateTranscription(text: String) {
@@ -231,13 +251,15 @@ class AudioRecorderManager(
         shouldBeRecording = false
         silenceDetectionJob?.cancel()
         releaseMediaRecorder()
+    }
+
+    fun destroy() {
+        release()
+        processingScope.cancel()
         try {
             recordingsDir.listFiles()?.forEach { it.delete() }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-
-    // REMOVED: setSilenceThreshold() and setSilenceDuration() functions
-    // (Their logic is now handled by the property setters at the top)
 }

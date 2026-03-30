@@ -25,4 +25,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Jibberish"
 include(":app")
+include(":server")
  

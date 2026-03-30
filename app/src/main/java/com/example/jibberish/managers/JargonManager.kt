@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import android.util.Log
 import org.json.JSONObject
 
 class JargonManager(
@@ -51,6 +52,7 @@ Always respond with valid JSON only, no additional text or markdown.
         modelManager.modelStatus.collect { status ->
             _modelStatus.value = when (status) {
                 is ModelManager.ModelStatus.Checking -> ModelStatus.Checking
+                is ModelManager.ModelStatus.Downloading -> ModelStatus.Checking  // not ready yet
                 is ModelManager.ModelStatus.Ready -> ModelStatus.Ready
                 is ModelManager.ModelStatus.Error -> ModelStatus.Error(status.message)
             }
@@ -68,7 +70,8 @@ Always respond with valid JSON only, no additional text or markdown.
             parseJsonResult(resultText, speechInput)
 
         } catch (e: Exception) {
-            JargonResult.Error("Error: ${e.localizedMessage ?: e.message}")
+            Log.e("JargonManager", "Jargon analysis failed", e)
+            JargonResult.Error("Analysis failed. Please try again.")
         }
     }
 
@@ -112,7 +115,8 @@ Always respond with valid JSON only, no additional text or markdown.
             )
 
         } catch (e: Exception) {
-            JargonResult.Error("Failed to parse response: ${e.message}")
+            Log.e("JargonManager", "Failed to parse jargon response", e)
+            JargonResult.Error("Failed to parse response.")
         }
     }
 

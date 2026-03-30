@@ -8,7 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -25,10 +25,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.RecordVoiceOver
+import com.example.jibberish.ui.theme.StatusDownloading
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,7 +56,9 @@ import com.example.jibberish.ui.screens.HistoryScreen
 import com.example.jibberish.ui.screens.SettingsScreen
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var modelManager: ModelManager
@@ -76,7 +83,7 @@ class MainActivity : ComponentActivity() {
         audioRecorderManager = AudioRecorderManager(applicationContext) { audioFile ->
             val result = sarvamService.transcribeAudio(audioFile)
             result.onSuccess { transcription ->
-                if (transcription.isNotBlank() && !isWhisperHallucination(transcription)) {
+                if (transcription.isNotBlank()) {
                     audioRecorderManager.updateTranscription(transcription)
                     val jargonResult = jargonManager.analyzeJargon(transcription)
                     // Always persist transcription; add jargon metadata when available
@@ -103,7 +110,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             result.onFailure { e ->
-                e.printStackTrace()
+                android.util.Log.e("MainActivity", "STT transcription failed", e)
             }
         }
 
@@ -152,21 +159,6 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Filters known Whisper hallucination phrases that appear on silent/near-silent audio.
- */
-private fun isWhisperHallucination(text: String): Boolean {
-    val normalized = text.trim().lowercase().removeSuffix(".").removeSuffix("!").trim()
-    val hallucinations = setOf(
-        "thanks for watching",
-        "thanks for listening",
-        "please subscribe",
-        "like and subscribe",
-        "the end",
-    )
-    return normalized in hallucinations
-}
-
-/**
  * Parses jargon terms from stored string.
  * Supports JSON object format {"term":"meaning"} and legacy comma-separated format.
  */
@@ -198,10 +190,10 @@ fun MainAppStructure(
     modelDownloadManager: ModelDownloadManager,
     sarvamService: SarvamSTTService
 ) {
-    var currentScreen by remember { mutableStateOf("home") }
+    var currentScreen by rememberSaveable { mutableStateOf("home") }
 
     // Track if there's a new summary notification for History tab
-    var hasNewSummary by remember { mutableStateOf(false) }
+    var hasNewSummary by rememberSaveable { mutableStateOf(false) }
 
     // Auto-reinit LLM after Gemma download completes
     val gemmaDownloadState by modelDownloadManager.downloadState.collectAsState()
@@ -215,7 +207,15 @@ fun MainAppStructure(
 
     Scaffold(
         bottomBar = {
-            NavigationBar {
+            Surface(
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shadowElevation = 8.dp
+            ) {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                tonalElevation = 0.dp
+            ) {
                 NavigationBarItem(
                     icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
                     label = { Text("Listen") },
@@ -254,23 +254,28 @@ fun MainAppStructure(
                     onClick = { currentScreen = "settings" }
                 )
             }
+            } // Surface
         }
     ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding)) {
-            when (currentScreen) {
+        Crossfade(
+            targetState = currentScreen,
+            modifier = Modifier.padding(innerPadding),
+            label = "screen_transition"
+        ) { screen ->
+            when (screen) {
                 "home" -> HomeScreen(
                     audioRecorderManager = audioRecorderManager,
                     jargonManager = jargonManager,
                     sessionManager = sessionManager,
                     sarvamService = sarvamService,
+                    modelManager = modelManager,
                     onSummaryGenerated = { hasNewSummary = true }
                 )
                 "history" -> HistoryScreen(sessionManager)
                 "settings" -> SettingsScreen(
                     dataRetentionManager = dataRetentionManager,
                     modelManager = modelManager,
-                    modelDownloadManager = modelDownloadManager,
-                    sarvamService = sarvamService
+                    modelDownloadManager = modelDownloadManager
                 )
             }
         }
@@ -284,12 +289,14 @@ fun HomeScreen(
     jargonManager: JargonManager,
     sessionManager: SessionManager,
     sarvamService: SarvamSTTService,
+    modelManager: ModelManager,
     onSummaryGenerated: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val textState by audioRecorderManager.transcribedText.collectAsState()
     val isRecording by audioRecorderManager.isRecording.collectAsState()
     val modelStatus by jargonManager.modelStatus.collectAsState()
+    val rawModelStatus by modelManager.modelStatus.collectAsState()
     val isSessionActive by sessionManager.isSessionActive.collectAsState()
     val sessionStatus by sessionManager.sessionStatus.collectAsState()
     val currentTranslations by sessionManager.currentTranslations.collectAsState()
@@ -309,9 +316,12 @@ fun HomeScreen(
                 )
             }
         }
-    var lastSeenJargonCount by remember { mutableIntStateOf(0) }
+    var lastSeenJargonCount by rememberSaveable { mutableIntStateOf(0) }
     val unreadJargonCount = (jargonItems.size - lastSeenJargonCount).coerceAtLeast(0)
     val jargonListState = rememberLazyListState()
+
+    // Tab state: 0 = Live Feed, 1 = Jargon
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
     // Reset unread counter when session ends
     LaunchedEffect(isSessionActive) {
@@ -327,7 +337,7 @@ fun HomeScreen(
         }
     }
 
-    var hasPermission: Boolean by remember {
+    var hasPermission: Boolean by rememberSaveable {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
                     == PackageManager.PERMISSION_GRANTED
@@ -371,9 +381,11 @@ fun HomeScreen(
                         }
                     } else {
                         audioRecorderManager.stopRecording()
-                        val session = sessionManager.endSession()
-                        if (session?.generatedSummary != null) {
-                            onSummaryGenerated()
+                        withContext(NonCancellable) {
+                            val session = sessionManager.endSession()
+                            if (session?.generatedSummary != null) {
+                                onSummaryGenerated()
+                            }
                         }
                     }
                 }
@@ -388,38 +400,197 @@ fun HomeScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // Model status card — only visible when model is not yet ready
+        ModelStatusCard(status = rawModelStatus, modifier = Modifier.fillMaxWidth())
+
         // Error card — auto-hides when no errors
         ErrorCard(
             sttError = (sttStatus as? SarvamSTTService.SttStatus.Error)?.message,
             modelError = (modelStatus as? JargonManager.ModelStatus.Error)?.message
         )
 
+        // TabRow for Live Feed / Jargon
+        PrimaryTabRow(
+            selectedTabIndex = selectedTab,
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.primary
+        ) {
+            Tab(
+                selected = selectedTab == 0,
+                onClick = { selectedTab = 0 },
+                text = { Text("Live Feed") }
+            )
+            Tab(
+                selected = selectedTab == 1,
+                onClick = {
+                    selectedTab = 1
+                    lastSeenJargonCount = jargonItems.size
+                },
+                text = {
+                    if (unreadJargonCount > 0 && selectedTab != 1) {
+                        BadgedBox(
+                            badge = {
+                                Badge { Text(unreadJargonCount.toString()) }
+                            }
+                        ) {
+                            Text("Jargon")
+                        }
+                    } else {
+                        Text("Jargon")
+                    }
+                }
+            )
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Transcription Area
-        TranscriptionCard(
-            text = textState,
-            isRecording = isRecording,
-            isTranscribing = sttStatus is SarvamSTTService.SttStatus.Transcribing,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(0.3f)
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Jargon Cards Section
-        JargonSection(
-            jargonItems = jargonItems,
-            unreadCount = unreadJargonCount,
-            listState = jargonListState,
-            onClearUnread = { lastSeenJargonCount = jargonItems.size },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(0.7f)
-        )
+        // Tab content fills remaining space
+        when (selectedTab) {
+            0 -> TranscriptionCard(
+                text = textState,
+                isRecording = isRecording,
+                isSessionActive = isSessionActive,
+                isTranscribing = sttStatus is SarvamSTTService.SttStatus.Transcribing,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+            1 -> JargonSection(
+                jargonItems = jargonItems,
+                isSessionActive = isSessionActive,
+                listState = jargonListState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            )
+        }
     }
 }
+
+/**
+ * Compact status card shown on HomeScreen when the AI model is not yet ready.
+ * Hides itself entirely once ModelStatus.Ready — takes zero space when hidden.
+ */
+@Composable
+private fun ModelStatusCard(
+    status: ModelManager.ModelStatus,
+    modifier: Modifier = Modifier
+) {
+    // Only render when model is not ready
+    if (status is ModelManager.ModelStatus.Ready) return
+
+    val (iconTint, containerColor, headline, subtext, showProgress, isIndeterminate, progress) =
+        when (status) {
+            is ModelManager.ModelStatus.Checking -> ModelStatusCardData(
+                iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                headline = "Checking AI model...",
+                subtext = null,
+                showProgress = true,
+                isIndeterminate = true,
+                progress = 0f
+            )
+            is ModelManager.ModelStatus.Downloading -> {
+                val modelName = when (status.modelType) {
+                    is ModelManager.ModelType.AICore -> "Gemini Nano"
+                    is ModelManager.ModelType.MediaPipe -> "Gemma 2B"
+                }
+                val sub = when (status.modelType) {
+                    is ModelManager.ModelType.AICore -> "System is downloading the model in the background."
+                    is ModelManager.ModelType.MediaPipe ->
+                        if (status.progressPercent >= 0) "${status.progressPercent}% downloaded"
+                        else "Download in progress..."
+                }
+                val prog = if (status.progressPercent >= 0) status.progressPercent / 100f else 0f
+                ModelStatusCardData(
+                    iconTint = StatusDownloading,
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    headline = "Downloading $modelName",
+                    subtext = sub,
+                    showProgress = true,
+                    isIndeterminate = status.progressPercent < 0,
+                    progress = prog
+                )
+            }
+            is ModelManager.ModelStatus.Error -> ModelStatusCardData(
+                iconTint = MaterialTheme.colorScheme.error,
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                headline = status.message,
+                subtext = "Go to Settings → AI Model to switch to Gemma 2B.",
+                showProgress = false,
+                isIndeterminate = false,
+                progress = 0f
+            )
+            is ModelManager.ModelStatus.Ready -> return  // unreachable, silences exhaustive warning
+        }
+
+    Card(
+        modifier = modifier.padding(bottom = 8.dp),
+        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = containerColor),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (showProgress && isIndeterminate) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = iconTint
+                    )
+                } else if (status is ModelManager.ModelStatus.Error) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = iconTint
+                    )
+                }
+                Text(
+                    text = headline,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    color = if (status is ModelManager.ModelStatus.Error)
+                        MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            subtext?.let {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (status is ModelManager.ModelStatus.Error)
+                        MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                )
+            }
+            if (showProgress && !isIndeterminate) {
+                Spacer(modifier = Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = StatusDownloading,
+                    trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                )
+            }
+        }
+    }
+}
+
+private data class ModelStatusCardData(
+    val iconTint: androidx.compose.ui.graphics.Color,
+    val containerColor: androidx.compose.ui.graphics.Color,
+    val headline: String,
+    val subtext: String?,
+    val showProgress: Boolean,
+    val isIndeterminate: Boolean,
+    val progress: Float
+)
 
 @Composable
 private fun ErrorCard(
@@ -429,7 +600,9 @@ private fun ErrorCard(
     if (sttError == null && modelError == null) return
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
         shape = RoundedCornerShape(12.dp)
     ) {
@@ -475,14 +648,11 @@ private fun SessionControlBar(
             sessionStatus is SessionManager.SessionStatus.GeneratingSummary ||
             (isSessionActive && sttStatus is SarvamSTTService.SttStatus.Transcribing)
 
-    val backgroundColor by animateColorAsState(
-        targetValue = if (isSessionActive) Color(0xFF4CAF50) else MaterialTheme.colorScheme.surfaceVariant,
-        label = "bg_color"
-    )
+    val canStart = modelReady && sttStatus is SarvamSTTService.SttStatus.Ready
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(16.dp)
     ) {
         Row(
@@ -492,7 +662,10 @@ private fun SessionControlBar(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
                 Text(
                     text = when {
                         sessionStatus is SessionManager.SessionStatus.GeneratingSummary -> "Generating Summary..."
@@ -500,48 +673,71 @@ private fun SessionControlBar(
                         sttStatus is SarvamSTTService.SttStatus.Transcribing -> "Transcribing..."
                         isSessionActive && isRecording -> "Listening"
                         isSessionActive -> "Session Active"
-                        sttStatus is SarvamSTTService.SttStatus.NotConfigured -> "Add Sarvam API key in Settings"
-                        sttStatus is SarvamSTTService.SttStatus.Error -> "STT error — see Settings"
-                        !modelReady -> "Loading AI model..."
-                        else -> "Toggle to start"
+                        else -> "Ready"
                     },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (isSessionActive || isLoading) Color.White else MaterialTheme.colorScheme.onSurface
+                    color = if (isSessionActive) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurface
                 )
                 if (isSessionActive) {
                     Text(
                         text = "$translationCount chunks captured",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.8f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                } else if (!canStart) {
+                    // Prerequisite hints
+                    val hint = when {
+                        sttStatus is SarvamSTTService.SttStatus.Error -> "STT error — check Settings"
+                        !modelReady -> "Loading AI model..."
+                        else -> null
+                    }
+                    hint?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
+
+            Spacer(modifier = Modifier.width(12.dp))
 
             if (isLoading) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(32.dp),
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.primary,
                     strokeWidth = 3.dp
                 )
+            } else if (isSessionActive) {
+                Button(
+                    onClick = { onToggle(false) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Stop")
+                }
             } else {
-                Switch(
-                    checked = isSessionActive,
-                    onCheckedChange = { shouldActivate ->
-                        if (!hasPermission && shouldActivate) {
+                Button(
+                    onClick = {
+                        if (!hasPermission) {
                             onRequestPermission()
                         } else {
-                            onToggle(shouldActivate)
+                            onToggle(true)
                         }
                     },
-                    enabled = isSessionActive || (modelReady && sttStatus is SarvamSTTService.SttStatus.Ready),
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Color.White.copy(alpha = 0.3f),
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                )
+                    enabled = canStart,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Start Listening")
+                }
             }
         }
     }
@@ -574,7 +770,7 @@ private fun AudioWaveIndicator(modifier: Modifier = Modifier) {
                     .width(3.dp)
                     .fillMaxHeight(animatedHeight.value)
                     .clip(RoundedCornerShape(1.5.dp))
-                    .background(MaterialTheme.colorScheme.primary)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
             )
         }
     }
@@ -584,6 +780,7 @@ private fun AudioWaveIndicator(modifier: Modifier = Modifier) {
 private fun TranscriptionCard(
     text: String,
     isRecording: Boolean,
+    isSessionActive: Boolean,
     isTranscribing: Boolean,
     modifier: Modifier = Modifier
 ) {
@@ -627,16 +824,41 @@ private fun TranscriptionCard(
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scrollState)
-            ) {
-                Text(
-                    text = text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+
+            if (text.isBlank()) {
+                // Empty state
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Outlined.RecordVoiceOver,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = if (isSessionActive) "Listening... speech will appear here"
+                                   else "Start a session to see transcription",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(scrollState)
+                ) {
+                    Text(
+                        text = text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
         }
     }
@@ -645,46 +867,20 @@ private fun TranscriptionCard(
 @Composable
 private fun JargonSection(
     jargonItems: List<JargonItem>,
-    unreadCount: Int,
+    isSessionActive: Boolean,
     listState: androidx.compose.foundation.lazy.LazyListState,
-    onClearUnread: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val scope = rememberCoroutineScope()
+
     Column(modifier = modifier) {
-        // Section Header with badge
+        // Section Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Jargons",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            if (unreadCount > 0) {
-                Badge(
-                    containerColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Star,
-                            contentDescription = null,
-                            modifier = Modifier.size(10.dp)
-                        )
-                        Spacer(modifier = Modifier.width(2.dp))
-                        Text(
-                            text = unreadCount.toString(),
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
             Spacer(modifier = Modifier.weight(1f))
             Text(
                 text = "${jargonItems.size} total",
@@ -704,41 +900,79 @@ private fun JargonSection(
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "No jargon detected yet",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    Icon(
+                        imageVector = Icons.Outlined.RecordVoiceOver,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                     )
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Start speaking to detect corporate jargon",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        text = if (isSessionActive) "Listening... jargon will appear here"
+                               else "Start a session to detect jargon",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     )
                 }
             }
         } else {
-            LazyColumn(
-                state = listState,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(jargonItems, key = { it.id }) { item ->
-                    JargonNotificationCard(
-                        jargon = item.jargon,
-                        meaning = item.meaning
-                    )
-                }
-                item {
-                    Spacer(modifier = Modifier.height(8.dp))
+            // Smart auto-scroll: track if user is near bottom
+            val isNearBottom by remember {
+                derivedStateOf {
+                    val layoutInfo = listState.layoutInfo
+                    val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()
+                    lastVisibleItem != null &&
+                        lastVisibleItem.index >= layoutInfo.totalItemsCount - 2
                 }
             }
-        }
-    }
 
-    // Clear unread count when user scrolls
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) {
-            onClearUnread()
+            // Auto-scroll only when near bottom
+            LaunchedEffect(jargonItems.size, isNearBottom) {
+                if (jargonItems.isNotEmpty() && isNearBottom) {
+                    listState.animateScrollToItem(jargonItems.size - 1)
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(jargonItems, key = { it.id }) { item ->
+                        JargonNotificationCard(
+                            jargon = item.jargon,
+                            meaning = item.meaning,
+                            timestamp = item.timestamp,
+                            modifier = Modifier.animateItem()
+                        )
+                    }
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+
+                // "Jump to live" FAB when scrolled away
+                if (!isNearBottom && jargonItems.size > 3) {
+                    SmallFloatingActionButton(
+                        onClick = {
+                            scope.launch {
+                                listState.animateScrollToItem(jargonItems.size - 1)
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(16.dp),
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Jump to live"
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -746,10 +980,24 @@ private fun JargonSection(
 @Composable
 private fun JargonNotificationCard(
     jargon: String,
-    meaning: String
+    meaning: String,
+    timestamp: Long,
+    modifier: Modifier = Modifier
 ) {
+    val relativeTime = remember(timestamp) {
+        val diff = System.currentTimeMillis() - timestamp
+        val minutes = diff / 60_000
+        val hours = diff / 3_600_000
+        when {
+            minutes < 1 -> "just now"
+            minutes < 60 -> "${minutes}m ago"
+            hours < 24 -> "${hours}h ago"
+            else -> "${hours / 24}d ago"
+        }
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -766,14 +1014,14 @@ private fun JargonNotificationCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.tertiaryContainer),
+                    .background(MaterialTheme.colorScheme.secondaryContainer),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "J",
+                    text = jargon.firstOrNull()?.uppercase() ?: "J",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
             }
 
@@ -796,6 +1044,12 @@ private fun JargonNotificationCard(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     lineHeight = 18.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = relativeTime,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
         }

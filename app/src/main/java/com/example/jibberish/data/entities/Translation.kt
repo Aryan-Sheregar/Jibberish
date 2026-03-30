@@ -46,7 +46,7 @@ data class Translation(
     val containsJargon: Boolean = false,
     
     @ColumnInfo(name = "jargon_terms")
-    val jargonTerms: String? = null, // Comma-separated list
+    val jargonTerms: String? = null, // JSON object: {"term":"meaning"}
     
     @ColumnInfo(name = "simplified_meaning")
     val simplifiedMeaning: String? = null

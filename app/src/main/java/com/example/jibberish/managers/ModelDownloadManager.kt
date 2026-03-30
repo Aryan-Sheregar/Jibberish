@@ -1,11 +1,12 @@
 package com.example.jibberish.managers
 
 import android.content.Context
+import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,11 +17,14 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 
 /**
  * Downloads on-device model files when not found on disk.
- * Models are saved to external files dir (user-accessible).
+ * Models are saved to internal app storage (app-sandboxed, not user-accessible).
  */
 class ModelDownloadManager(private val context: Context) {
 
@@ -44,30 +48,27 @@ class ModelDownloadManager(private val context: Context) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS) // No read timeout — large file download
+        .readTimeout(0, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     companion object {
+        private const val TAG = "ModelDownloadManager"
         private const val GEMMA_DOWNLOAD_URL =
-            "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2b-it-gpu-int4/float32/1/gemma-2b-it-gpu-int4.bin"
+            "https://storage.googleapis.com/mediapipe-models/llm_inference/gemma-2b-it-gpu-int4/float32/latest/gemma-2b-it-gpu-int4.bin"
         const val GEMMA_FILENAME = "gemma-2b-it-gpu-int4.bin"
     }
 
     private fun getModelDir(): File =
-        context.getExternalFilesDir(null) ?: context.filesDir
+        File(context.filesDir, "models").apply { if (!exists()) mkdirs() }
 
-    /**
-     * Returns the absolute path to the Gemma model file if it already exists on disk, null otherwise.
-     */
     fun getModelPath(): String? {
         val file = getModelFile()
         return if (file.exists() && file.length() > 0) file.absolutePath else null
     }
 
-    /**
-     * Starts downloading the Gemma 2B model with streaming progress updates.
-     * Safe to call multiple times — ignores if already downloading.
-     */
     fun startDownload() {
         if (_downloadState.value is DownloadState.Downloading) return
 
@@ -83,15 +84,16 @@ class ModelDownloadManager(private val context: Context) {
 
                 if (!response.isSuccessful) {
                     val code = response.code
-                    val body = response.message
+                    val msg = response.message
+                    Log.e(TAG, "Download failed: HTTP $code $msg")
+                    response.body.close()
                     _downloadState.value = DownloadState.Failed(
-                        "Download failed: $code $body. Check your internet connection and try again."
+                        "Server returned HTTP $code ($msg). Try again later."
                     )
                     return@launch
                 }
 
                 val body = response.body
-
                 val contentLength = body.contentLength()
                 val totalMb = if (contentLength > 0) contentLength / 1_048_576f else 0f
 
@@ -109,11 +111,9 @@ class ModelDownloadManager(private val context: Context) {
                             bytesRead += read
 
                             if (contentLength > 0) {
-                                val downloadedMb = bytesRead / 1_048_576f
-                                val percent = ((bytesRead * 100) / contentLength).toInt()
                                 _downloadState.value = DownloadState.Downloading(
-                                    progressPercent = percent,
-                                    downloadedMb = downloadedMb,
+                                    progressPercent = ((bytesRead * 100) / contentLength).toInt(),
+                                    downloadedMb = bytesRead / 1_048_576f,
                                     totalMb = totalMb
                                 )
                             }
@@ -131,18 +131,14 @@ class ModelDownloadManager(private val context: Context) {
                 throw e
             } catch (e: Exception) {
                 tempFile.delete()
-                _downloadState.value = DownloadState.Failed(
-                    "Download failed: ${e.message}. Check your internet connection and try again."
-                )
+                Log.e(TAG, "Model download failed", e)
+                _downloadState.value = DownloadState.Failed(describeDownloadError(e))
             } finally {
                 gemmaCall = null
             }
         }
     }
 
-    /**
-     * Cancels an in-progress Gemma download and resets state to Idle.
-     */
     fun cancelDownload() {
         gemmaCall?.cancel()
         gemmaCall = null
@@ -159,4 +155,17 @@ class ModelDownloadManager(private val context: Context) {
     }
 
     private fun getModelFile(): File = File(getModelDir(), GEMMA_FILENAME)
+
+    private fun describeDownloadError(e: Exception): String = when (e) {
+        is UnknownHostException ->
+            "DNS lookup failed — check your internet connection."
+        is SocketTimeoutException ->
+            "Connection timed out. Try again on a stronger network."
+        is SSLException ->
+            "SSL/TLS error: ${e.message}. Try again later."
+        is IOException ->
+            "Network error: ${e.message ?: "I/O failure"}. Try again."
+        else ->
+            "Download failed: ${e.message ?: "Unknown error"}. Try again."
+    }
 }

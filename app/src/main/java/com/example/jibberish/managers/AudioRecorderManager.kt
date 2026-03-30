@@ -6,7 +6,11 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import android.util.Log
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AudioRecorderManager(
     private val context: Context,
@@ -20,10 +24,13 @@ class AudioRecorderManager(
 
     private var mediaRecorder: MediaRecorder? = null
     private var currentRecordingFile: File? = null
-    private var shouldBeRecording = false
+    private val shouldBeRecording = AtomicBoolean(false)
     private var silenceDetectionJob: Job? = null
     private val processingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var accumulatedTranscription = StringBuilder()
+
+    // Guards MediaRecorder lifecycle to prevent concurrent start/stop races
+    private val recorderMutex = Mutex()
 
     // MediaRecorder.maxAmplitude range: 0–32767
     // Ambient noise in a quiet room: ~200–800. Normal speech: ~1500–10000.
@@ -41,7 +48,7 @@ class AudioRecorderManager(
     var minChunkDurationMs: Long = 1500L    // discard chunks shorter than 1.5 s
 
     // Minimum number of 100ms polling intervals that must have detected speech
-    // before a chunk is forwarded to Whisper.
+    // before a chunk is forwarded to STT.
     // 8 intervals = at least 800 ms of actual speech in the chunk.
     private val minSpeechIntervals: Int = 8
 
@@ -57,22 +64,24 @@ class AudioRecorderManager(
     }
 
     fun startRecording() {
-        if (shouldBeRecording) return
+        if (shouldBeRecording.get()) return
 
-        shouldBeRecording = true
+        shouldBeRecording.set(true)
         _isRecording.value = true
         // Clear previous session's accumulated text so each session starts fresh
         accumulatedTranscription.clear()
         _transcribedText.value = "Listening..."
 
-        startNewRecording()
+        processingScope.launch {
+            startNewRecordingLocked()
+        }
     }
 
-    private fun startNewRecording() {
-        if (!shouldBeRecording) return
+    private suspend fun startNewRecordingLocked(): Unit = recorderMutex.withLock {
+        if (!shouldBeRecording.get()) return
 
         try {
-            releaseMediaRecorder()
+            releaseMediaRecorderInternal()
 
             currentRecordingFile = File(recordingsDir, "recording_${System.currentTimeMillis()}.m4a")
             currentChunkStartTime = System.currentTimeMillis()
@@ -100,10 +109,10 @@ class AudioRecorderManager(
             startSilenceDetection()
 
         } catch (e: Exception) {
-            e.printStackTrace()
-            shouldBeRecording = false
+            Log.e("AudioRecorderManager", "Recording error", e)
+            shouldBeRecording.set(false)
             _isRecording.value = false
-            _transcribedText.value = "Recording error: ${e.message}"
+            _transcribedText.value = "Recording error. Please try again."
         }
     }
 
@@ -112,8 +121,11 @@ class AudioRecorderManager(
         silenceDetectionJob = processingScope.launch {
             var silenceStartTime: Long? = null
 
-            while (isActive && shouldBeRecording) {
+            while (isActive && shouldBeRecording.get()) {
                 delay(pollingIntervalMs)
+
+                // Re-check after delay — stop may have been called during the delay
+                if (!shouldBeRecording.get()) break
 
                 try {
                     // Check if max chunk duration has been reached
@@ -149,80 +161,128 @@ class AudioRecorderManager(
         }
     }
 
-    private fun processCurrentChunk() {
-        try {
-            val chunkDuration = System.currentTimeMillis() - currentChunkStartTime
+    private suspend fun processCurrentChunk() {
+        recorderMutex.withLock {
+            // Double-check: if stop was called, don't process or restart
+            val stillRecording = shouldBeRecording.get()
 
-            mediaRecorder?.apply {
-                stop()
-                reset()
-            }
-
-            val recordedFile = currentRecordingFile
-            val hadSpeech = chunkHadSpeech
-            val speechCount = speechIntervalCount
-
-            // Start new recording FIRST to minimize gap
-            if (shouldBeRecording) {
-                startNewRecording()
-            }
-
-            // Then dispatch chunk processing in background (non-blocking)
-            val hasMeaningfulSpeech = hadSpeech && speechCount >= minSpeechIntervals
-            if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
-                && hasMeaningfulSpeech && chunkDuration >= minChunkDurationMs
-            ) {
-                processingScope.launch {
-                    try {
-                        onAudioChunkReady(recordedFile)
-                    } finally {
-                        recordedFile.delete()
-                    }
-                }
-            }
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-            if (shouldBeRecording) {
-                startNewRecording()
-            }
-        }
-    }
-
-    suspend fun stopRecording() {
-        shouldBeRecording = false
-        _isRecording.value = false
-
-        silenceDetectionJob?.cancel()
-        silenceDetectionJob = null
-
-        withContext(Dispatchers.IO) {
             try {
+                val chunkDuration = System.currentTimeMillis() - currentChunkStartTime
+
                 mediaRecorder?.apply {
                     stop()
                     reset()
                 }
 
                 val recordedFile = currentRecordingFile
-                val hasMeaningfulSpeech = chunkHadSpeech && speechIntervalCount >= minSpeechIntervals
-                if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
-                    && hasMeaningfulSpeech
-                ) {
-                    try {
-                        onAudioChunkReady(recordedFile)
-                    } finally {
-                        recordedFile.delete()
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                releaseMediaRecorder()
-            }
+                val hadSpeech = chunkHadSpeech
+                val speechCount = speechIntervalCount
 
-            // Drain all in-flight chunk processing jobs
-            processingScope.coroutineContext[Job]?.children?.forEach { it.join() }
+                // Start new recording FIRST to minimize gap — only if still recording
+                if (stillRecording) {
+                    releaseMediaRecorderInternal()
+
+                    currentRecordingFile = File(recordingsDir, "recording_${System.currentTimeMillis()}.m4a")
+                    currentChunkStartTime = System.currentTimeMillis()
+                    chunkHadSpeech = false
+                    speechIntervalCount = 0
+                    totalIntervalCount = 0
+
+                    mediaRecorder =
+                        MediaRecorder(context)
+                            .apply {
+                        setAudioSource(MediaRecorder.AudioSource.MIC)
+                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setAudioEncodingBitRate(32000)
+                        setAudioSamplingRate(16000)
+                        setAudioChannels(1)
+                        setOutputFile(currentRecordingFile?.absolutePath)
+                        prepare()
+                        start()
+                    }
+                } else {
+                    // Stop was called — clean up recorder, don't restart
+                    releaseMediaRecorderInternal()
+                }
+
+                // Dispatch chunk processing in background (non-blocking)
+                val hasMeaningfulSpeech = hadSpeech && speechCount >= minSpeechIntervals
+                if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
+                    && hasMeaningfulSpeech && chunkDuration >= minChunkDurationMs
+                ) {
+                    processingScope.launch {
+                        try {
+                            onAudioChunkReady(recordedFile)
+                        } finally {
+                            recordedFile.delete()
+                        }
+                    }
+                } else {
+                    // Discard chunk file for non-meaningful audio
+                    recordedFile?.delete()
+                }
+
+            } catch (e: Exception) {
+                Log.e("AudioRecorderManager", "Recording error", e)
+                if (stillRecording) {
+                    releaseMediaRecorderInternal()
+                    // Attempt to recover by starting fresh outside the mutex
+                }
+            }
         }
+
+        // If we need to recover after an error, restart outside the mutex
+        if (shouldBeRecording.get() && mediaRecorder == null) {
+            startNewRecordingLocked()
+        }
+    }
+
+    suspend fun stopRecording() {
+        // Set flag first — this immediately prevents any new recordings from starting
+        shouldBeRecording.set(false)
+        _isRecording.value = false
+
+        // Cancel silence detection so it doesn't call processCurrentChunk concurrently
+        silenceDetectionJob?.cancel()
+        silenceDetectionJob?.join()
+        silenceDetectionJob = null
+
+        recorderMutex.withLock {
+            withContext(Dispatchers.IO) {
+                try {
+                    mediaRecorder?.apply {
+                        stop()
+                        reset()
+                    }
+
+                    val recordedFile = currentRecordingFile
+                    val hasMeaningfulSpeech = chunkHadSpeech && speechIntervalCount >= minSpeechIntervals
+                    if (recordedFile != null && recordedFile.exists() && recordedFile.length() > 0
+                        && hasMeaningfulSpeech
+                    ) {
+                        try {
+                            onAudioChunkReady(recordedFile)
+                        } finally {
+                            recordedFile.delete()
+                        }
+                    } else {
+                        // Clean up non-meaningful final chunk
+                        currentRecordingFile?.delete()
+                    }
+                } catch (e: Exception) {
+                    Log.e("AudioRecorderManager", "Recording error", e)
+                    // Clean up file on error too
+                    currentRecordingFile?.delete()
+                } finally {
+                    releaseMediaRecorderInternal()
+                    currentRecordingFile = null
+                }
+            }
+        }
+
+        // Drain all in-flight chunk processing jobs
+        processingScope.coroutineContext[Job]?.children?.forEach { it.join() }
     }
 
     fun updateTranscription(text: String) {
@@ -235,22 +295,29 @@ class AudioRecorderManager(
         }
     }
 
-    private fun releaseMediaRecorder() {
+    // Internal release — caller must hold recorderMutex
+    private fun releaseMediaRecorderInternal() {
         try {
             mediaRecorder?.apply {
                 reset()
                 release()
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("AudioRecorderManager", "Recording error", e)
         }
         mediaRecorder = null
     }
 
     fun release() {
-        shouldBeRecording = false
+        shouldBeRecording.set(false)
         silenceDetectionJob?.cancel()
-        releaseMediaRecorder()
+        try {
+            mediaRecorder?.apply {
+                reset()
+                release()
+            }
+        } catch (_: Exception) {}
+        mediaRecorder = null
     }
 
     fun destroy() {
@@ -259,7 +326,7 @@ class AudioRecorderManager(
         try {
             recordingsDir.listFiles()?.forEach { it.delete() }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("AudioRecorderManager", "Recording error", e)
         }
     }
 }

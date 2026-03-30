@@ -29,19 +29,12 @@ interface SessionDao {
     @Query("SELECT * FROM sessions WHERE is_active = 1 LIMIT 1")
     suspend fun getActiveSession(): Session?
     
-    @Query("SELECT * FROM sessions ORDER BY start_timestamp DESC")
-    fun getAllSessions(): Flow<List<Session>>
-    
     @Query("SELECT * FROM sessions WHERE is_active = 0 ORDER BY start_timestamp DESC")
     fun getCompletedSessions(): Flow<List<Session>>
     
     @Transaction
     @Query("SELECT * FROM sessions WHERE session_id = :sessionId")
     suspend fun getSessionWithTranslations(sessionId: String): SessionWithTranslations?
-    
-    @Transaction
-    @Query("SELECT * FROM sessions WHERE is_active = 0 ORDER BY start_timestamp DESC")
-    fun getCompletedSessionsWithTranslations(): Flow<List<SessionWithTranslations>>
     
     // End a session: set end timestamp and mark as inactive
     @Query("UPDATE sessions SET end_timestamp = :endTime, is_active = 0 WHERE session_id = :sessionId")
@@ -59,10 +52,6 @@ interface SessionDao {
     @Query("DELETE FROM sessions WHERE end_timestamp IS NOT NULL AND end_timestamp < :beforeTimestamp")
     suspend fun deleteSessionsOlderThan(beforeTimestamp: Long): Int
     
-    // Get session count for statistics
-    @Query("SELECT COUNT(*) FROM sessions WHERE is_active = 0")
-    suspend fun getCompletedSessionCount(): Int
-
     // Get session count as observable Flow
     @Query("SELECT COUNT(*) FROM sessions WHERE is_active = 0")
     fun getCompletedSessionCountFlow(): Flow<Int>

@@ -26,7 +26,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -43,12 +42,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.jibberish.managers.DataRetentionManager
 import com.example.jibberish.managers.ModelDownloadManager
 import com.example.jibberish.managers.ModelManager
-import com.example.jibberish.managers.SarvamSTTService
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,14 +53,12 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     dataRetentionManager: DataRetentionManager,
     modelManager: ModelManager,
-    modelDownloadManager: ModelDownloadManager,
-    sarvamService: SarvamSTTService
+    modelDownloadManager: ModelDownloadManager
 ) {
     val currentRetentionDays by dataRetentionManager.getRetentionDays().collectAsState(initial = DataRetentionManager.DEFAULT_RETENTION_DAYS)
     val modelStatus by modelManager.modelStatus.collectAsState()
     val currentModelType by modelManager.currentModelType.collectAsState()
     val downloadState by modelDownloadManager.downloadState.collectAsState()
-    val sttStatus by sarvamService.status.collectAsState()
     var showRetentionDialog by remember { mutableStateOf(false) }
     var showClearDataDialog by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
@@ -144,20 +139,6 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Speech Recognition Section
-            Text(
-                text = "Speech Recognition",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
-            )
-
-            SarvamApiKeyCard(
-                sarvamService = sarvamService,
-                sttStatus = sttStatus,
-                scope = scope
-            )
-
             // AI Model Section
             Text(
                 text = "AI Model",
@@ -184,6 +165,15 @@ fun SettingsScreen(
                         Text(
                             text = when (modelStatus) {
                                 is ModelManager.ModelStatus.Checking -> "Checking availability..."
+                                is ModelManager.ModelStatus.Downloading -> {
+                                    val m = modelStatus as ModelManager.ModelStatus.Downloading
+                                    when (m.modelType) {
+                                        is ModelManager.ModelType.AICore -> "Gemini Nano downloading (system-managed)..."
+                                        is ModelManager.ModelType.MediaPipe ->
+                                            if (m.progressPercent >= 0) "Gemma 2B downloading: ${m.progressPercent}%"
+                                            else "Gemma 2B downloading..."
+                                    }
+                                }
                                 is ModelManager.ModelStatus.Ready -> {
                                     when (currentModelType) {
                                         is ModelManager.ModelType.AICore -> "AICore (Gemini Nano)"
@@ -201,13 +191,14 @@ fun SettingsScreen(
                             }
                         )
                     }
-                    if (modelStatus is ModelManager.ModelStatus.Checking) {
+                    if (modelStatus is ModelManager.ModelStatus.Checking ||
+                        modelStatus is ModelManager.ModelStatus.Downloading) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     }
                 }
             }
 
-            // Gemma 2B download card — always shown so it can always be downloaded
+            // Gemma 2B download card
             GemmaDownloadCard(
                 downloadState = downloadState,
                 existingModelPath = gemmaModelPath,
@@ -215,7 +206,7 @@ fun SettingsScreen(
                 onCancel = { modelDownloadManager.cancelDownload() }
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider()
 
             // Data Management Section
             Text(
@@ -229,7 +220,6 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column {
-                    // Data Retention Setting
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -261,7 +251,6 @@ fun SettingsScreen(
 
                     HorizontalDivider()
 
-                    // Clear All Data
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -291,52 +280,6 @@ fun SettingsScreen(
                     }
                 }
             }
-
-        }
-    }
-}
-
-@Composable
-private fun SarvamApiKeyCard(
-    sarvamService: SarvamSTTService,
-    sttStatus: SarvamSTTService.SttStatus,
-    scope: kotlinx.coroutines.CoroutineScope
-) {
-    var apiKeyInput by remember { mutableStateOf(sarvamService.getApiKey()) }
-    val isConfigured = sttStatus is SarvamSTTService.SttStatus.Ready ||
-            sttStatus is SarvamSTTService.SttStatus.Transcribing
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Sarvam Saaras-V3",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                text = if (isConfigured) "API key configured" else "API key required for speech-to-text",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (isConfigured) MaterialTheme.colorScheme.primary
-                       else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            OutlinedTextField(
-                value = apiKeyInput,
-                onValueChange = { apiKeyInput = it },
-                label = { Text("API Key") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    scope.launch { sarvamService.setApiKey(apiKeyInput) }
-                },
-                enabled = apiKeyInput.isNotBlank()
-            ) {
-                Text("Save")
-            }
         }
     }
 }
@@ -359,25 +302,33 @@ private fun GemmaDownloadCard(
             when {
                 downloadState is ModelDownloadManager.DownloadState.Completed ||
                 existingModelPath != null && downloadState is ModelDownloadManager.DownloadState.Idle -> {
-                    val path = (downloadState as? ModelDownloadManager.DownloadState.Completed)?.modelPath
-                        ?: existingModelPath ?: ""
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Ready",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = path,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Model downloaded and ready (~1.5 GB)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
                 downloadState is ModelDownloadManager.DownloadState.Downloading -> {
                     val state = downloadState
                     Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Ensure you're on Wi-Fi for large downloads",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "${state.progressPercent}%  —  ${"%.1f".format(state.downloadedMb)} / ${"%.1f".format(state.totalMb)} MB",
                         style = MaterialTheme.typography.bodySmall,
@@ -408,15 +359,14 @@ private fun GemmaDownloadCard(
                 }
 
                 else -> {
-                    // Idle, model not on disk
                     Text(
-                        text = "Required for MediaPipe (Gemma 2B) inference. ~1.5 GB download.",
+                        text = "Required for MediaPipe (Gemma 2B) inference.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = onDownload) {
-                        Text("Download Model")
+                        Text("Download Model (~1.5 GB)")
                     }
                 }
             }
@@ -431,7 +381,7 @@ private fun ModelSelectionDialog(
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
-    val aiCoreSupported = remember { modelManager.isAICoreSupported() }
+    val aiCoreSupported = remember { modelManager.isAICoreHardwareSupported() }
     var selectedModel by remember {
         mutableStateOf(
             when (currentModelType) {
@@ -453,7 +403,6 @@ private fun ModelSelectionDialog(
                     modifier = Modifier.padding(bottom = 16.dp)
                 )
 
-                // AICore option
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -467,23 +416,22 @@ private fun ModelSelectionDialog(
                         enabled = aiCoreSupported
                     )
                     Spacer(modifier = Modifier.width(12.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "AICore (Gemini Nano)",
                             style = MaterialTheme.typography.bodyLarge,
                             color = if (aiCoreSupported) MaterialTheme.colorScheme.onSurface
                             else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                         )
-                        if (!aiCoreSupported) {
-                            Text(
-                                text = "Not available on this device",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
+                        Text(
+                            text = if (aiCoreSupported) "Cloud-assisted. Faster, lower memory. Requires Android 14+."
+                                   else "Not available on this device (requires Android 14+)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (aiCoreSupported) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.error
+                        )
                     }
                     if (selectedModel == ModelManager.MODEL_AICORE && aiCoreSupported) {
-                        Spacer(modifier = Modifier.weight(1f))
                         Icon(
                             imageVector = Icons.Default.Check,
                             contentDescription = "Selected",
@@ -492,7 +440,6 @@ private fun ModelSelectionDialog(
                     }
                 }
 
-                // MediaPipe option
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -505,19 +452,18 @@ private fun ModelSelectionDialog(
                         onClick = { selectedModel = ModelManager.MODEL_MEDIAPIPE }
                     )
                     Spacer(modifier = Modifier.width(12.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "MediaPipe (Gemma 2B)",
                             style = MaterialTheme.typography.bodyLarge
                         )
                         Text(
-                            text = "Local on-device model",
+                            text = "Fully offline. ~1.5 GB download. Works on all devices.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     if (selectedModel == ModelManager.MODEL_MEDIAPIPE) {
-                        Spacer(modifier = Modifier.weight(1f))
                         Icon(
                             imageVector = Icons.Default.Check,
                             contentDescription = "Selected",

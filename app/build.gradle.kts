@@ -1,8 +1,15 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     id("com.google.devtools.ksp") version "2.3.5"
+}
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -19,11 +26,22 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // STT credentials — set in local.properties or environment variables.
+        // SARVAM_API_KEY  : used for direct API calls during development.
+        // STT_PROXY_URL   : when set, app routes STT through your Ktor proxy instead.
+        val sarvamApiKey = localProps.getProperty("SARVAM_API_KEY")
+            ?: System.getenv("SARVAM_API_KEY") ?: ""
+        val sttProxyUrl = localProps.getProperty("STT_PROXY_URL")
+            ?: System.getenv("STT_PROXY_URL") ?: ""
+        buildConfigField("String", "SARVAM_API_KEY", "\"$sarvamApiKey\"")
+        buildConfigField("String", "STT_PROXY_URL", "\"$sttProxyUrl\"")
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -41,6 +59,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -70,6 +89,9 @@ dependencies {
 
     // DataStore for preferences
     implementation("androidx.datastore:datastore-preferences:1.2.0")
+
+    // Encrypted storage for sensitive credentials
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // ViewModel Compose
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")

@@ -9,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -34,15 +37,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,23 +63,34 @@ import com.example.jibberish.managers.SessionManager
 import com.example.jibberish.parseJargonTerms
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 @Composable
 fun HistoryScreen(sessionManager: SessionManager) {
     val sessions by sessionManager.getCompletedSessions().collectAsState(initial = emptyList())
+    var selectedSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedSession by remember { mutableStateOf<SessionWithTranslations?>(null) }
     val scope = rememberCoroutineScope()
-    
+
+    // Re-fetch session when selectedSessionId changes
+    LaunchedEffect(selectedSessionId) {
+        if (selectedSessionId != null) {
+            selectedSession = sessionManager.getSessionWithTranslations(selectedSessionId!!)
+        } else {
+            selectedSession = null
+        }
+    }
+
     if (selectedSession != null) {
         SessionDetailScreen(
             sessionWithTranslations = selectedSession!!,
-            onBack = { selectedSession = null },
+            onBack = { selectedSessionId = null },
             onDelete = {
                 scope.launch {
                     sessionManager.deleteSession(selectedSession!!.session)
-                    selectedSession = null
+                    selectedSessionId = null
                 }
             }
         )
@@ -80,9 +98,7 @@ fun HistoryScreen(sessionManager: SessionManager) {
         SessionListScreen(
             sessions = sessions,
             onSessionClick = { session ->
-                scope.launch {
-                    selectedSession = sessionManager.getSessionWithTranslations(session.sessionId)
-                }
+                selectedSessionId = session.sessionId
             },
             onDeleteSession = { session ->
                 scope.launch {
@@ -118,6 +134,13 @@ private fun SessionListScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
+                    Icon(
+                        imageVector = Icons.Outlined.History,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "No sessions yet",
                         style = MaterialTheme.typography.headlineSmall,
@@ -158,7 +181,7 @@ private fun SessionCard(
     onDelete: () -> Unit
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
-    
+
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
@@ -181,7 +204,7 @@ private fun SessionCard(
             }
         )
     }
-    
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -197,25 +220,25 @@ private fun SessionCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = formatDate(session.startTimestamp),
+                    text = formatRelativeDate(session.startTimestamp),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 IconButton(
                     onClick = { showDeleteDialog = true },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Delete session",
                         tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(4.dp))
-            
+
             Row(
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -231,12 +254,12 @@ private fun SessionCard(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
-            
+
             session.generatedSummary?.let { summary ->
                 Spacer(modifier = Modifier.height(12.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(12.dp))
-                
+
                 Text(
                     text = "Summary",
                     style = MaterialTheme.typography.labelMedium,
@@ -263,7 +286,7 @@ private fun SessionDetailScreen(
     onDelete: () -> Unit
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
-    
+
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
@@ -286,7 +309,7 @@ private fun SessionDetailScreen(
             }
         )
     }
-    
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -325,7 +348,7 @@ private fun SessionDetailScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = formatDate(sessionWithTranslations.session.startTimestamp),
+                            text = formatRelativeDate(sessionWithTranslations.session.startTimestamp),
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
@@ -341,7 +364,7 @@ private fun SessionDetailScreen(
                     }
                 }
             }
-            
+
             // Summary Card
             sessionWithTranslations.session.generatedSummary?.let { summary ->
                 item {
@@ -366,7 +389,7 @@ private fun SessionDetailScreen(
                     }
                 }
             }
-            
+
             // Translations Header
             item {
                 Text(
@@ -376,7 +399,7 @@ private fun SessionDetailScreen(
                     modifier = Modifier.padding(vertical = 8.dp)
                 )
             }
-            
+
             // Translation Items
             items(sessionWithTranslations.translations, key = { it.translationId }) { translation ->
                 TranslationCard(translation = translation)
@@ -385,14 +408,23 @@ private fun SessionDetailScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TranslationCard(translation: Translation) {
-    var isExpanded by remember { mutableStateOf(false) }
+    val hasJargon = translation.containsJargon && !translation.jargonTerms.isNullOrBlank()
+    var isExpanded by rememberSaveable(translation.translationId) { mutableStateOf(false) }
+
+    val parsedTerms = remember(translation.jargonTerms) {
+        translation.jargonTerms?.takeIf { hasJargon }?.let { parseJargonTerms(it) } ?: emptyList()
+    }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { isExpanded = !isExpanded },
+            .then(
+                if (hasJargon) Modifier.clickable { isExpanded = !isExpanded }
+                else Modifier
+            ),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
         )
@@ -409,16 +441,7 @@ private fun TranslationCard(translation: Translation) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (translation.containsJargon) {
-                        Text(
-                            text = "Jargon",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
+                if (hasJargon) {
                     Icon(
                         imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                         contentDescription = if (isExpanded) "Collapse" else "Expand",
@@ -437,52 +460,72 @@ private fun TranslationCard(translation: Translation) {
                 color = MaterialTheme.colorScheme.onSurface
             )
 
+            // Jargon chips visible in collapsed state
+            if (hasJargon && parsedTerms.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    parsedTerms.forEach { (term, _) ->
+                        SuggestionChip(
+                            onClick = { isExpanded = !isExpanded },
+                            label = {
+                                Text(
+                                    text = term,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            colors = SuggestionChipDefaults.suggestionChipColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                labelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        )
+                    }
+                }
+            }
+
             AnimatedVisibility(
                 visible = isExpanded,
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut()
             ) {
                 Column {
-                    if (translation.containsJargon) {
+                    if (hasJargon) {
                         Spacer(modifier = Modifier.height(12.dp))
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        translation.jargonTerms?.let { terms ->
-                            val parsed = parseJargonTerms(terms)
-                            val hasIndividualMeanings = parsed.any { it.second.isNotBlank() }
+                        val hasIndividualMeanings = parsedTerms.any { it.second.isNotBlank() }
 
-                            if (hasIndividualMeanings) {
-                                // New format: each term has its own meaning
-                                parsed.forEach { (term, meaning) ->
-                                    Text(
-                                        text = term,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = meaning.ifBlank { "—" },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                }
-                            } else {
-                                // Old comma-separated format: show terms, then simplifiedMeaning as explanation
+                        if (hasIndividualMeanings) {
+                            parsedTerms.forEach { (term, meaning) ->
                                 Text(
-                                    text = "Jargon Terms:",
-                                    style = MaterialTheme.typography.labelMedium,
+                                    text = term,
+                                    style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    text = parsed.joinToString(", ") { it.first },
+                                    text = meaning.ifBlank { "—" },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                             }
+                        } else {
+                            Text(
+                                text = "Jargon Terms:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = parsedTerms.joinToString(", ") { it.first },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
                         }
 
                         translation.simplifiedMeaning?.takeIf { it.isNotBlank() }?.let { simplified ->
@@ -506,9 +549,33 @@ private fun TranslationCard(translation: Translation) {
     }
 }
 
-private fun formatDate(timestamp: Long): String {
-    val sdf = SimpleDateFormat("MMM dd, yyyy 'at' h:mm a", Locale.getDefault())
-    return sdf.format(Date(timestamp))
+private fun formatRelativeDate(timestamp: Long): String {
+    val now = Calendar.getInstance()
+    val then = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val timeFmt = SimpleDateFormat("h:mm a", Locale.getDefault())
+    val timeStr = timeFmt.format(Date(timestamp))
+
+    val todayCal = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    val yesterdayCal = (todayCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -1) }
+    val weekAgoCal = (todayCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -6) }
+
+    return when {
+        timestamp >= todayCal.timeInMillis -> "Today at $timeStr"
+        timestamp >= yesterdayCal.timeInMillis -> "Yesterday at $timeStr"
+        timestamp >= weekAgoCal.timeInMillis -> {
+            val dayFmt = SimpleDateFormat("EEEE", Locale.getDefault())
+            "${dayFmt.format(Date(timestamp))} at $timeStr"
+        }
+        else -> {
+            val dateFmt = SimpleDateFormat("MMM d", Locale.getDefault())
+            "${dateFmt.format(Date(timestamp))} at $timeStr"
+        }
+    }
 }
 
 private fun formatTime(timestamp: Long): String {
@@ -518,12 +585,12 @@ private fun formatTime(timestamp: Long): String {
 
 private fun formatDuration(start: Long, end: Long?): String {
     if (end == null) return "In progress"
-    
+
     val durationMs = end - start
     val seconds = (durationMs / 1000) % 60
     val minutes = (durationMs / (1000 * 60)) % 60
     val hours = durationMs / (1000 * 60 * 60)
-    
+
     return when {
         hours > 0 -> "${hours}h ${minutes}m ${seconds}s"
         minutes > 0 -> "${minutes}m ${seconds}s"

@@ -179,7 +179,8 @@ Return your response as a plain text summary (2-4 sentences). Be concise and inf
             modelManager.generateText(fullPrompt)
 
         } catch (e: Exception) {
-            "Summary generation failed: ${e.localizedMessage ?: e.message}"
+            android.util.Log.e("SessionManager", "Summary generation failed", e)
+            "Summary generation failed. Please check model settings."
         }
     }
 

@@ -40,7 +40,7 @@ class MediaPipeLLMService(private val context: Context) {
 
         } catch (e: Exception) {
             isInitialized = false
-            throw Exception("Failed to initialize MediaPipe LLM: ${e.message}", e)
+            throw Exception("Failed to initialize MediaPipe LLM", e)
         }
     }
 
@@ -65,38 +65,7 @@ class MediaPipeLLMService(private val context: Context) {
 
             cleanedResponse
         } catch (e: Exception) {
-            throw Exception("Text generation failed: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Generate text response with streaming callback.
-     * Note: MediaPipe GenAI may not support true streaming in all versions.
-     * This method falls back to generating the full response.
-     *
-     * @param prompt The input prompt
-     * @param onPartialResult Callback invoked with the result
-     * @return Final generated text (cleaned)
-     */
-    suspend fun generateTextStream(
-        prompt: String,
-        onPartialResult: (String) -> Unit
-    ): String = withContext(Dispatchers.IO) {
-        if (!isInitialized || llmInference == null) {
-            throw IllegalStateException("MediaPipe LLM not initialized. Call initialize() first.")
-        }
-
-        try {
-            // Generate full response
-            val response = llmInference!!.generateResponse(prompt)
-            val cleaned = cleanResponse(response)
-
-            // Invoke callback with full result
-            onPartialResult(cleaned)
-
-            cleaned
-        } catch (e: Exception) {
-            throw Exception("Text generation failed: ${e.message}", e)
+            throw Exception("Text generation failed", e)
         }
     }
 
@@ -133,22 +102,6 @@ class MediaPipeLLMService(private val context: Context) {
 
         return cleaned
     }
-
-    /**
-     * Get model information and metadata.
-     */
-    fun getModelInfo(): String? {
-        return if (isInitialized && llmInference != null) {
-            "MediaPipe LLM (Gemma 2B GPU-INT4)"
-        } else {
-            null
-        }
-    }
-
-    /**
-     * Check if the service is initialized and ready.
-     */
-    fun isReady(): Boolean = isInitialized
 
     /**
      * Release resources and cleanup.

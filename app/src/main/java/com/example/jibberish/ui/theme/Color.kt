@@ -2,15 +2,30 @@ package com.example.jibberish.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// Brand identity — deep violet + soft teal
+val JibberishViolet = Color(0xFF7B61FF)
+val JibberishVioletLight = Color(0xFFB39DFF)
+val JibberishVioletDark = Color(0xFF4D2FD8)
+val JibberishRose = Color(0xFF00BCD4)
+val JibberishRoseDark = Color(0xFF00BCD4)
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+// Dark theme surfaces
+val JibberishBlack = Color(0xFF0A0A0F)
+val JibberishDarkGray = Color(0xFF12121A)
+val JibberishSurfaceHigh = Color(0xFF1E1E2E)
 
-// Custom Jibberish Colors
-val JibberishBlack = Color(0xFF121212)
-val JibberishDarkGray = Color(0xFF1E1E1E)
-val JibberishCyan = Color(0xFF00E5FF)
+// Light theme surfaces
+val JibberishLightBg = Color(0xFFF5F5FF)
+val JibberishLightSurface = Color(0xFFFFFFFF)
+
+// Status colors — colorblind-safe (Wong palette; avoids red/green-only distinctions)
+val StatusListening = Color(0xFF7B61FF)   // violet  — safe for all CVD types
+val StatusProcessing = Color(0xFF0077B6)  // strong blue  — distinct from violet
+val StatusReady = JibberishViolet          // alias: violet = good
+val StatusDownloading = Color(0xFFF0A500) // amber   — universally distinguishable
+val StatusError = Color(0xFFD55E00)       // orange-red (Wong palette)  — safe for deuteranopia/protanopia
+val StatusIdle = Color(0xFF9E9E9E)        // neutral grey — never ambiguous
+
+// On-color variants
+val OnVioletDark = Color(0xFF1A0080)
+val OnRoseDark = Color(0xFF5C0025)
